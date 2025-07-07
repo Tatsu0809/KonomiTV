@@ -260,6 +260,18 @@ class APIClient {
                     } else if (error_response.error.code === AxiosError.ERR_NETWORK) {
                         // 予期しないネットワークエラーの場合
                         Message.error(`${template}\n予期しないネットワークエラーが発生しました。(${error_response.error.message})`);
+                        if (!error_response.error.config?.url?.startsWith('/cdn-cgi/')){
+                            (async ()=>{
+                                const CFZTStore = useCFZTStore();
+                                await CFZTStore.fetchCFZTIdentity();
+                                const u = new URL(location.href);
+                                if (u.searchParams.get('pwa') !== 'false' && !u.searchParams.get('__cf_access_message') && CFZTStore.is_CFZT && !CFZTStore.is_login) {
+                                    console.log('Cloudflare ZeroTrust Login need!!');
+                                    u.searchParams.set('pwa','false');
+                                    location.href = u.href;
+                                }
+                            })();
+                        }
                     } else {
                         // それ以外のエラーの場合
                         Message.error(`${template}(${error_response.error.message})`);

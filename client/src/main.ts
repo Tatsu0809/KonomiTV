@@ -124,3 +124,4 @@ window.setInterval(async () => {
         await settings_store.syncClientSettingsFromServer();
     }
 }, 3 * 1000);  // 3秒おき
+
