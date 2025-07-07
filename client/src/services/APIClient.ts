@@ -9,6 +9,7 @@ import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, AxiosResponseHead
 import Message from '@/message';
 import useUserStore from '@/stores/UserStore';
 import Utils from '@/utils';
+import useCFZTStore from '@/stores/CloudflareZerotrustStone';
 
 
 /** API リクエスト成功時のレスポンスを表すインターフェイス */

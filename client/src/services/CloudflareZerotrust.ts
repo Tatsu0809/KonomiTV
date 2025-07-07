@@ -1,5 +1,7 @@
+
 import APIClient from '@/services/APIClient';
 import Utils from '@/utils';
+
 interface CloudflareZerotrustIdentity {
     id: string;
     name: string;
@@ -32,7 +34,9 @@ interface CloudflareZerotrustIdentity {
 
 export type ICloudflareZerotrustIdentity = CloudflareZerotrustIdentity | boolean | null ; 
 
+
 class CloudflareZerotrust {
+
     /**
      * Cloudflare Zerotrust ユーザー情報を取得する
      * @param suppress_error エラーメッセージを表示しない場合は true
@@ -60,3 +64,4 @@ class CloudflareZerotrust {
 }
 
 export default CloudflareZerotrust;
+
