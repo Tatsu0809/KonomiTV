@@ -279,7 +279,7 @@ def Updater(version: str) -> None:
         # GitHub からソースコードをダウンロード
         ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
         if version == 'latest':
-            source_code_response = requests.get('https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/heads/master')
+            source_code_response = requests.get('https://codeload.github.com/Tatsu0809/KonomiTV/zip/refs/heads/zero-trust')
         else:
             source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
