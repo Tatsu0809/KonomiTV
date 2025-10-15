@@ -137,7 +137,7 @@ def main(
         # 起動するアプリケーション
         app = 'app.app:app',
         # リッスンするアドレス
-        host = 'CONFIG.server.host',
+        host = '0.0.0.0',
         # リッスンするポート番号
         ## 指定されたポートに 10 を足したもの
         port = CONFIG.server.port,
