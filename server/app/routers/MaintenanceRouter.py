@@ -54,6 +54,11 @@ async def GetCurrentAdminUserOrLocal(
     token: Annotated[str | None, Depends(OAuth2PasswordBearer(tokenUrl='users/token', auto_error=False))],
 ) -> User | None:
 
+    # HTTP リクエストの Host ヘッダーが 127.0.0.77:7010 である場合、Windows サービスプロセスからのアクセスと見なす
+    valid_host = f'127.0.0.1:{Config().server.port}'
+    if request.headers.get('host', '').strip() == valid_host:
+        return None
+
     # 管理者ユーザーでログインしているかを確認する
     if token is None:
         logging.error('[MaintenanceRouter][GetCurrentAdminUserOrLocal] Not authenticated.')
