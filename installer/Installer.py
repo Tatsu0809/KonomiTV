@@ -534,7 +534,7 @@ def Installer(version: str) -> None:
         # ソースコードを解凍して展開
         shutil.unpack_archive(source_code_file.name, install_path.parent, format='zip')
         if version == 'latest':
-            shutil.move(install_path.parent / 'KonomiTV-master/', install_path)
+            shutil.move(install_path.parent / 'KonomiTV-zeto-trust/', install_path)
         else:
             shutil.move(install_path.parent / f'KonomiTV-{version}/', install_path)
         Path(source_code_file.name).unlink()

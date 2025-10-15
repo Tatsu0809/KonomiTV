@@ -229,7 +229,7 @@ def Updater(version: str) -> None:
 
         # 新しいバージョンのコードをチェックアウト
         ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
-        revision = 'master' if version == 'latest' else f'v{version}'
+        revision = 'zero-trust' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを更新しています…',
             ['git', 'checkout', '--force', revision],
@@ -297,8 +297,8 @@ def Updater(version: str) -> None:
         # ソースコードを解凍して展開
         shutil.unpack_archive(source_code_file.name, update_path.parent, format='zip')
         if version == 'latest':
-            shutil.copytree(update_path.parent / 'KonomiTV-master/', update_path, dirs_exist_ok=True)
-            shutil.rmtree(update_path.parent / 'KonomiTV-master/', ignore_errors=True)
+            shutil.copytree(update_path.parent / 'KonomiTV-zero-trust/', update_path, dirs_exist_ok=True)
+            shutil.rmtree(update_path.parent / 'KonomiTV-zero-trust/', ignore_errors=True)
         else:
             shutil.copytree(update_path.parent / f'KonomiTV-{version}/', update_path, dirs_exist_ok=True)
             shutil.rmtree(update_path.parent / f'KonomiTV-{version}/', ignore_errors=True)
