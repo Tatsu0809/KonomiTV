@@ -211,12 +211,11 @@ class KonomiTVServiceFramework(win32serviceutil.ServiceFramework):
             servicemanager.LogErrorMsg(f'[KonomiTV-Service][SvcStop] Unexpected error while reporting stop: {ex!r}')
 
         # KonomiTV サーバーのシャットダウン API にリクエストしてサーバーを終了させる
-        ## 通常管理者ユーザーでログインしていないと実行できないが、特別に 127.0.0.77:7010 に直接アクセスすると無認証で実行できる
         shutdown_requested = False
         try:
             from app.config import GetServerPort
             response = httpx.post(
-                f'http://127.0.0.77:{GetServerPort() + 10}/api/maintenance/shutdown',
+                f'http://127.0.0.1:{GetServerPort()}/api/maintenance/shutdown',
                 timeout = 5.0,
             )
             if 200 <= response.status_code <= 299:
