@@ -1,7 +1,6 @@
 
 import { defineStore } from 'pinia';
 
-import Utils from '@/utils';
 import CloudflareZerotrust, { ICloudflareZerotrustIdentity } from '@/services/CloudflareZerotrust';
 import useSettingsStore from '@/stores/SettingsStore';
 
@@ -21,11 +20,11 @@ const useCFZTStore = defineStore('CFZT', {
         // null
         is_CFZT(): boolean {
             const settings_store = useSettingsStore();
-            return !!settings_store.settings.is_cloudflare_zerotrust
+            return !!settings_store.settings.is_cloudflare_zerotrust;
         },
         // null false
         is_login(): boolean {
-            return !!this.identity_info
+            return !!this.identity_info;
         }
     },
     actions: {
@@ -37,21 +36,21 @@ const useCFZTStore = defineStore('CFZT', {
          * @returns CFZT でない場合は null、ログインしていない場合は false
          */
         async fetchCFZTIdentity(force: boolean = false): Promise<ICloudflareZerotrustIdentity | null> {
-            const settings_store = useSettingsStore();
+            //const settings_store = useSettingsStore();
             // hidden setting = is_cloudflare_zerotrust
             // if(settings_store.settings.is_cloudflare_zerotrust === false && force === false){
             //     return null;
             // }
-            if (this.identity_info !== null && force === false) {
-                // ただし、最終更新日時が5秒以上前の場合は非同期で更新する
-                if (Utils.time() - this.last_updated_at > 5) {
-                    this.fetchCFZTIdentity(true);
-                }
-                return this.identity_info;
-            }
+            //if (this.identity_info !== null && force === false) {
+            //    // ただし、最終更新日時が5秒以上前の場合は非同期で更新する
+            //    if (Utils.time() - this.last_updated_at > 5) {
+            //        this.fetchCFZTIdentity(true);
+            //    }
+            //    return this.identity_info;
+            //}
 
             const identity_info = await CloudflareZerotrust.fetchCloudflareZerotrustIdentity();
-            console.log('identity_info',!!identity_info,!identity_info,identity_info);
+            //console.log('identity_info',!!identity_info,!identity_info,identity_info);
             settings_store.settings.is_cloudflare_zerotrust = (identity_info !== null);
             
             this.identity_info = identity_info;
