@@ -36,7 +36,7 @@ const useCFZTStore = defineStore('CFZT', {
          * @returns CFZT でない場合は null、ログインしていない場合は false
          */
         async fetchCFZTIdentity(force: boolean = false): Promise<ICloudflareZerotrustIdentity | null> {
-            //const settings_store = useSettingsStore();
+            const settings_store = useSettingsStore();
             // hidden setting = is_cloudflare_zerotrust
             // if(settings_store.settings.is_cloudflare_zerotrust === false && force === false){
             //     return null;
