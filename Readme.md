@@ -131,6 +131,9 @@
     - 240622 以降で実装された Linux 版 EDCB での動作確認は行っていません。私の開発環境では [EDCB-Wine](https://github.com/tsukumijima/EDCB-Wine) で安定稼働しています。
   - **Mirakurun は 3.9.0 以降を推奨します。**
     - 3.8.0 以下のバージョンでも動作しますが、諸問題で推奨しません。
+    - **Mirakurun 4.0.0-beta.5 以下のバージョンでは、KonomiTV の起動時のバージョン情報取得によりドロップが発生する問題があります。**
+      - この問題を回避するには、KonomiTV を 0.13.0 以降に更新するか、Mirakurun を 4.0.0-beta.6 以降に更新する必要があります。
+      - 詳細は [こちらのツイートスレッド](https://x.com/TVRemotePlus/status/1982242605200011590) をご確認ください。
   - **Mirakurun 互換チューナーサーバーである [mirakc](https://github.com/mirakc/mirakc) も利用できます。**
     - 動作確認は最新版のみで行っています。
     - mirakc は局ロゴの収集に対応していないため、局ロゴが同梱されていないチャンネルでは、常にデフォルトの局ロゴが利用されます。
@@ -274,16 +277,17 @@ KonomiTV は、[QSVEncC](https://github.com/rigaya/QSVEnc) (Intel QSV)・[NVEncC
 
 #### Windows
 
-- QSVEncC：[Intel Graphics Driver](https://downloadcenter.intel.com/ja/product/80939/Graphics-Drivers)
+- QSVEncC：[Intel Graphics Driver](https://www.intel.co.jp/content/www/jp/ja/support/articles/000005629/graphics/processor-graphics.html)
 - NVEncC：[NVIDIA Graphics Driver](https://www.nvidia.co.jp/Download/index.aspx)
-- VCEEncC：[AMD Graphics Driver](https://www.amd.com/ja/support)
+- VCEEncC：[AMD Graphics Driver](https://www.amd.com/ja/support/download/drivers.html)
 
 それぞれのハードウェアエンコーダーを使用するには、対応した GPU ドライバーのインストールが必要です。  
-基本的にすでにインストールされていると思います。
+Windows の場合、基本的にすでにインストール済みのはずです。
 
 > [!NOTE]  
-> 古いドライバーを使用している場合は、この機会に最新のドライバーにアップデートしておくことをおすすめします。  
-> ドライバーが古すぎると、ハードウェアエンコードに失敗する場合があります。
+> **古いドライバーを使用している場合は、この機会に最新のドライバーにアップデートしておくことをおすすめします。**  
+> ドライバーが古すぎると、ハードウェアエンコードに失敗する場合があります。  
+> KonomiTV をアップデートした後は、ドライバーも最新のドライバーにアップデートしておくことをおすすめします。
 
 #### Linux - QSVEncC
 
@@ -295,18 +299,22 @@ KonomiTV は、[QSVEncC](https://github.com/rigaya/QSVEnc) (Intel QSV)・[NVEncC
 > なお、Windows 版の Intel QSV は、Haswell (第4世代) 以下の CPU でも利用できます。
 
 ```bash
+# Ubuntu 24.04 LTS
+curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu noble unified' | sudo tee /etc/apt/sources.list.d/intel-gpu-noble.list > /dev/null
 
 # Ubuntu 22.04 LTS
-curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/intel-graphics-keyring.gpg
-echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu jammy client' | sudo tee /etc/apt/sources.list.d/intel-graphics.list > /dev/null
-# Ubuntu 20.04 LTS (対応する GPG 鍵のダウンロード URL が微妙に異なる)
-curl -fsSL https://repositories.intel.com/graphics/intel-graphics.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/intel-graphics-keyring.gpg
+curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified' | sudo tee /etc/apt/sources.list.d/intel-gpu-jammy.list > /dev/null
+
+# Ubuntu 20.04 LTS
+curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg
 echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu focal client' | sudo tee /etc/apt/sources.list.d/intel-graphics.list > /dev/null
 
-sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libmfxgen1
+sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2
 ```
 
-以上のコマンドを実行して、Intel Media Driver をインストールしてください (Ubuntu 20.04 LTS 以降向け) 。  
+上記のコマンドを実行して、Intel Media Driver をインストールしてください (Ubuntu 20.04 LTS 以降向け) 。  
 最新のインストール手順は [QSVEncC の公式ドキュメント](https://github.com/rigaya/QSVEnc/blob/master/Install.ja.md) もあわせてご確認ください。
 
 > [!NOTE]  
@@ -333,29 +341,31 @@ sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-open
 
 #### Linux - VCEEncC
 
-**VCEEncC では、[AMDGPU-PRO Driver](https://www.amd.com/ja/support/linux-drivers) のインストールが必要です。**  
-古いドライバーがインストールされていると、VCEEncC を利用できないことがあります。最新のドライバーをインストールしてください。
+**VCEEncC では、[AMDGPU-PRO Driver](https://www.amd.com/ja/support/download/linux-drivers.html) のインストールが必要です。**  
+
+> [!WARNING]  
+> **古いドライバーがインストールされている場合、VCEEncC が動作しない可能性があります。**  
+> KonomiTV をアップデートした後は、AMDGPU-PRO Driver も最新のドライバーにアップデートしてください。
 
 > [!WARNING]  
 > **VCEEncC を使うには AMDGPU-PRO ドライバーが必要です。**  
 > オープンソース版の AMDGPU ドライバーには AMD AMF (Advanced Media Framework) が含まれていないため、VCEEncC を利用できません。
 
 ```bash
-# Ubuntu 20.04 LTS (2024/09時点で最新の amdgpu-install パッケージの URL)
-curl -LO https://repo.radeon.com/amdgpu-install/23.40.3/ubuntu/focal/amdgpu-install_6.0.60003-1_all.deb
-# Ubuntu 22.04 LTS (2024/09時点で最新の amdgpu-install パッケージの URL)
-curl -LO https://repo.radeon.com/amdgpu-install/23.40.3/ubuntu/jammy/amdgpu-install_6.0.60003-1_all.deb
+# Ubuntu 24.04 LTS (2025年11月時点で最新の amdgpu-install パッケージの URL)
+curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/noble/amdgpu-install_6.4.60404-1_all.deb
+# Ubuntu 22.04 LTS (2025年11月時点で最新の amdgpu-install パッケージの URL)
+curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/jammy/amdgpu-install_6.4.60404-1_all.deb
 
 # AMDGPU-PRO Driver のインストール
-sudo apt install -y ./amdgpu-install_6.0.60003-1_all.deb
-sudo apt update && sudo amdgpu-install -y --accept-eula --usecase=graphics,amf,opencl --opencl=rocr,legacy --no-32
+sudo apt install -y ./amdgpu-install_6.4.60404-1_all.deb
+sudo apt update && sudo amdgpu-install -y --accept-eula --usecase=graphics,amf,opencl --opencl=rocr --vulkan=amdvlk --no-32
 
 # 再起動
 sudo reboot
 ```
 
-
-以上のコマンドを実行して、AMDGPU-PRO Driver をインストールしてください (Ubuntu 20.04 LTS 以降向け) 。
+上記のコマンドを実行して、AMDGPU-PRO Driver をインストールしてください (Ubuntu 22.04 LTS 以降向け) 。
 
 #### Linux - rkmppenc
 
@@ -379,7 +389,7 @@ rm rockchip-multimedia-config_1.0.2-1_all.deb
 sudo reboot
 ```
 
-以上のコマンドを実行して、Mali GPU Driver と、Rockchip のハードウェアエンコーダーを有効化するための設定パッケージをインストールしてください。  
+上記のコマンドを実行して、Mali GPU Driver と、Rockchip のハードウェアエンコーダーを有効化するための設定パッケージをインストールしてください (Ubuntu 20.04 LTS 以降向け) 。  
 [rkmppenc の公式ドキュメント](https://github.com/tsukumijima/rkmppenc/blob/master/Install.ja.md) もあわせてご確認ください。
 
 ### Tailscale の導入
@@ -501,7 +511,8 @@ Assets の下にある `KonomiTV-Installer.exe` をダウンロードしてく�
 
 > [!WARNING]  
 > **NVIDIA が KonomiTV で利用していたバージョンの CUDA Docker イメージを削除した影響で 、0.12.0 以下では Docker を使ったインストール方法が動作しなくなりました。**  
-> 0.13.0 以降のバージョンでは CUDA Docker イメージを `nvidia/cuda:12.2.2-runtime-ubuntu22.04` に変更しています。0.13.0 以降へのアップデートをお願いします。
+> 0.13.0 以降のバージョンでは、RTX 5090 などの Blackwell 世代 GPU の対応も兼ね、CUDA Docker イメージを `nvidia/cuda:12.8.0-base-ubuntu22.04` に変更しています。0.13.0 以降へのアップデートをお願いします。  
+> なお、CUDA 12.8 の動作には  nvidia-driver-570 以上のドライバーがインストールされている必要があります。
 
 > [!WARNING]  
 > **AMD が Docker イメージ内で利用している AMDGPU-PRO ドライバーの旧バージョンの APT リポジトリをサイレントに削除した影響で ([#118](https://github.com/tsukumijima/KonomiTV/issues/118) / [#130](https://github.com/tsukumijima/KonomiTV/issues/130) を参照) 、0.11.0 以下では Docker を使ったインストール方法が動作しなくなりました。**  
@@ -937,10 +948,10 @@ Copy-Item -Force config.example.yaml config.yaml
 cp -a config.example.yaml config.yaml
 nano config.yaml
 
-# 一時的な Poetry 仮想環境の構築 (UpdateThirdparty の実行に必要)
+# 一時的な Poetry 仮想環境の構築 (poetry run task update-thirdparty の実行に必要)
 cd server/
 poetry env use 3.11
-poetry install --no-root
+poetry install --no-root --with dev
 
 # 最新のサードパーティーライブラリを GitHub Actions からダウンロード
 ## 本番環境用のスタンドアローン版 Python もサードパーティーライブラリに含まれている
@@ -957,7 +968,7 @@ rm -rf .venv/
 poetry env use /Develop/KonomiTV/server/thirdparty/Python/bin/python
 
 # 依存パッケージのインストール
-poetry install --no-root
+poetry install --no-root --with dev
 ```
 
 ### サーバーの起動
