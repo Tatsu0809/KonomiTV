@@ -3,6 +3,7 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <div class="mylist-container-wrapper">
                 <div class="mylist-container">
                     <Breadcrumbs :crumbs="[
@@ -19,7 +20,7 @@
                         :showBackButton="true"
                         :showEmptyMessage="!is_loading"
                         :emptyIcon="'ic:round-playlist-play'"
-                        :emptyMessage="'あとで見たい番組を<br class=\'d-sm-none\'>マイリストに保存できます。'"
+                        :emptyMessage="'あとで観たい番組を<br class=\'d-sm-none\'>マイリストに保存できます。'"
                         :emptySubMessage="'録画番組の右上にある ＋ ボタンから、<br class=\'d-sm-none\'>番組をマイリストに追加できます。'"
                         :forMylist="true"
                         @update:page="updatePage"
@@ -37,6 +38,7 @@ import { useRoute, useRouter } from 'vue-router';
 import Breadcrumbs from '@/components/Breadcrumbs.vue';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
 import { IRecordedProgram, MylistSortOrder } from '@/services/Videos';
 import Videos from '@/services/Videos';

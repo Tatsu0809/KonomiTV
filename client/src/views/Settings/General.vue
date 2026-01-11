@@ -20,6 +20,18 @@
                 <Icon icon="iconamoon:sorting-left-bold" height="19px" />
                 <span class="ml-1">ピン留め中チャンネルの並び替え設定を開く</span>
             </v-btn>
+            <div class="settings__item mt-6">
+                <div class="settings__item-heading">番組表の表示設定</div>
+                <div class="settings__item-label">
+                    番組表のチャンネル名の表示幅、時間軸の表示密度、ジャンル別のハイライト色などを設定できます。<br>
+                    番組表ページ上部の設定アイコンからも開くことができます。<br>
+                </div>
+            </div>
+            <v-btn class="settings__save-button mt-4" variant="flat" @click="timetable_settings_modal = !timetable_settings_modal">
+                <Icon icon="fluent:calendar-ltr-16-regular" height="19px" />
+                <span class="ml-1">番組表の表示設定を開く</span>
+            </v-btn>
+            <v-divider class="mt-6"></v-divider>
             <div class="settings__item settings__item--switch">
                 <label class="settings__item-heading" for="show_player_background_image">プレイヤーの読み込み中に背景写真を表示する</label>
                 <label class="settings__item-label" for="show_player_background_image">
@@ -43,7 +55,7 @@
             <div class="settings__item settings__item--switch">
                 <label class="settings__item-heading" for="tv_channel_selection_requires_alt_key">チャンネル選局のキーボードショートカットを {{Utils.AltOrOption()}} + 数字キー/テンキーに変更する</label>
                 <label class="settings__item-label" for="tv_channel_selection_requires_alt_key">
-                    この設定をオンにすると、数字キーまたはテンキーに対応するリモコン番号（1～12）のチャンネルに切り替えるとき、{{Utils.AltOrOption()}} キーを同時に押す必要があります。<br>
+                    オンにすると、数字キーまたはテンキーに対応するリモコン番号（1～12）のチャンネルに切り替えるとき、{{Utils.AltOrOption()}} キーを同時に押す必要があります。<br>
                     コメントやツイートを入力しようとして誤って数字キーを押してしまい、チャンネルが変わってしまう事態を避けたい方におすすめです。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="tv_channel_selection_requires_alt_key" hide-details
@@ -58,6 +70,16 @@
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="use_28hour_clock" hide-details
                     v-model="settingsStore.settings.use_28hour_clock">
+                </v-switch>
+            </div>
+            <div class="settings__item settings__item--switch">
+                <label class="settings__item-heading" for="show_original_broadcast_time_during_playback">録画番組の再生中に元の放送時刻を表示する</label>
+                <label class="settings__item-label" for="show_original_broadcast_time_during_playback">
+                    オンにすると、録画番組の再生中に現在時刻ではなく、元の放送時刻を再生位置に合わせて表示します。デフォルトはオフです。<br>
+                    元の放送時刻が表示されているときは、タイムシフト再生中であることを示すアイコンが時刻の左側に表示されます。<br>
+                </label>
+                <v-switch class="settings__item-switch" color="primary" id="show_original_broadcast_time_during_playback" hide-details
+                    v-model="settingsStore.settings.show_original_broadcast_time_during_playback">
                 </v-switch>
             </div>
             <v-divider class="mt-6"></v-divider>
@@ -134,6 +156,7 @@
             </v-btn>
         </div>
         <PinnedChannelSettings :modelValue="pinned_channel_settings_modal" @update:modelValue="pinned_channel_settings_modal = $event" />
+        <TimeTableSettingsDialog v-model:isOpen="timetable_settings_modal" />
     </SettingsBase>
 </template>
 <script lang="ts">
@@ -142,6 +165,7 @@ import { mapStores } from 'pinia';
 import { defineComponent } from 'vue';
 
 import PinnedChannelSettings from '@/components/Settings/PinnedChannelSettings.vue';
+import TimeTableSettingsDialog from '@/components/Settings/TimeTableSettings.vue';
 import Message from '@/message';
 import useSettingsStore from '@/stores/SettingsStore';
 import Utils from '@/utils';
@@ -151,6 +175,7 @@ export default defineComponent({
     name: 'Settings-General',
     components: {
         PinnedChannelSettings,
+        TimeTableSettingsDialog,
         SettingsBase,
     },
     data() {
@@ -164,6 +189,9 @@ export default defineComponent({
 
             // ピン留め中チャンネルの並び替え設定のモーダルを表示するか
             pinned_channel_settings_modal: false,
+
+            // 番組表の表示設定のモーダルを表示するか
+            timetable_settings_modal: false,
 
             // デフォルトのパネルの表示状態の選択肢
             panel_display_state: [

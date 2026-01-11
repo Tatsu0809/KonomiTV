@@ -3,6 +3,7 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <div class="settings-container d-flex px-5 py-5 mx-auto" width="100%" max-width="1000">
                 <nav class="settings-navigation">
                     <h1 class="mt-2 ml-4" style="font-size: 24px;">設定</h1>
@@ -59,6 +60,7 @@ import { defineComponent } from 'vue';
 
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 
 // 設定のベース画面なので、ロジックは基本置かない
 export default defineComponent({
@@ -66,6 +68,7 @@ export default defineComponent({
     components: {
         HeaderBar,
         Navigation,
+        SPHeaderBar,
     }
 });
 
@@ -149,6 +152,12 @@ export default defineComponent({
             padding-right: 16px !important;
             border-radius: 0 !important;
             background-color: rgb(var(--v-theme-background)) !important;
+        }
+
+        .v-divider {
+            opacity: 1 !important;
+            border-top-width: 2px !important;
+            border-color: rgb(var(--v-theme-background-lighten-2)) !important;
         }
 
         .settings__heading {
@@ -321,6 +330,32 @@ export default defineComponent({
                     @include smartphone-horizontal {
                         font-size: 12px;
                         line-height: 1.65;
+                    }
+
+                    // 設定項目の選択肢を箇条書きで表示するリスト
+                    .settings__item-option-list {
+                        margin: 0;
+                        padding-left: 1.2em;
+                        li {
+                            margin-bottom: 4px;
+                            &:last-child {
+                                margin-bottom: 0;
+                            }
+                            strong {
+                                color: rgb(var(--v-theme-text));
+                            }
+                        }
+                    }
+
+                    // 設定項目の補足情報を表示するノート
+                    .settings__item-note {
+                        margin-top: 6px;
+                        margin-bottom: 0;
+                        font-size: 12.5px;
+                        opacity: 0.85;
+                        @include smartphone-horizontal {
+                            font-size: 11.5px;
+                        }
                     }
                 }
                 &-form {
