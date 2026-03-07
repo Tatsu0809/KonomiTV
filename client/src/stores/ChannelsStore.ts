@@ -63,9 +63,9 @@ const useChannelsStore = defineStore('channels', {
             // 初回のチャンネル情報更新がまだ実行されていない or 実行中のときは、情報取得中であることを示すダミーのチャンネル情報を返す
             if (this.is_channels_list_initial_updated === false) {
                 return {
-                    previous: ILiveChannelDefault,
-                    current: ILiveChannelDefault,
-                    next: ILiveChannelDefault,
+                    previous: structuredClone(ILiveChannelDefault),
+                    current: structuredClone(ILiveChannelDefault),
+                    next: structuredClone(ILiveChannelDefault),
                 };
             }
 
@@ -401,7 +401,9 @@ const useChannelsStore = defineStore('channels', {
 
                 // ただし、最終更新日時が1分以上前の場合は非同期で更新する
                 if (Utils.time() - this.last_updated_at > 60) {
-                    update();
+                    update().catch((error) => {
+                        console.error('[ChannelsStore] Background update failed:', error);
+                    });
                 }
 
                 return;
