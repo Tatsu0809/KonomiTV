@@ -7,7 +7,6 @@ import asyncio
 import gc
 import os
 import re
-import sys
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
@@ -579,9 +578,10 @@ class LiveEncodingTask:
             # 字幕と文字スーパーを aribb24.js が解釈できる ID3 timed-metadata に変換する
             ## +4: FFmpeg のバグを打ち消すため、変換後のストリームに規格外の5バイトのデータを追加する
             ## +8: FFmpeg のエラーを防ぐため、変換後のストリームの PTS が単調増加となるように調整する
-            ## +4 は FFmpeg 6.1 以降不要になった (付与していると字幕が表示されなくなる) ため、
-            ## FFmpeg 4.4 系に依存している Linux 版 HWEncC 利用時のみ付与する
-            '-d', '13' if ENCODER_TYPE != 'FFmpeg' and sys.platform == 'linux' else '9',
+            ## 以前は Linux 版 HWEncC が FFmpeg 4.4 系の共有ライブラリに依存していたため +4 を付与していたが、
+            ## 現在の Linux 版 HWEncC は FFmpeg 8 系を静的リンクした最新版へ更新したため不要になった
+            ## +4 を残すと FFmpeg 6.1 以降では字幕が表示されなくなるため、常に +8 のみを付与する
+            '-d', '9',
         ]
 
         if CONFIG.tv.debug_mode_ts_path is None:
@@ -600,15 +600,24 @@ class LiveEncodingTask:
         tsreadex_read_pipe, tsreadex_write_pipe = os.pipe()
 
         # tsreadex のプロセスを非同期で作成・実行
-        tsreadex = await asyncio.subprocess.create_subprocess_exec(
-            *[LIBRARY_PATH['tsreadex'], *tsreadex_options],
-            stdin = asyncio.subprocess.PIPE,  # 受信した放送波を書き込む
-            stdout = tsreadex_write_pipe,  # エンコーダーに繋ぐ
-            stderr = asyncio.subprocess.DEVNULL,  # 利用しない
-        )
-
-        # tsreadex の書き込み用パイプを閉じる
-        os.close(tsreadex_write_pipe)
+        try:
+            tsreadex = await asyncio.subprocess.create_subprocess_exec(
+                *[LIBRARY_PATH['tsreadex'], *tsreadex_options],
+                stdin = asyncio.subprocess.PIPE,  # 受信した放送波を書き込む
+                stdout = tsreadex_write_pipe,  # エンコーダーに繋ぐ
+                stderr = asyncio.subprocess.DEVNULL,  # 利用しない
+            )
+        except BaseException:
+            # tsreadex の起動自体に失敗した場合は、この時点ではまだ tsreadex_read_pipe を誰にも渡していない
+            ## ここで close しないと run() が例外で脱出した際に read 側 FD だけが残る
+            try:
+                os.close(tsreadex_read_pipe)
+            except OSError:
+                pass
+            raise
+        finally:
+            # tsreadex の書き込み用パイプは子プロセスに渡したので、親プロセス側ではクローズする
+            os.close(tsreadex_write_pipe)
 
         # ***** エンコーダープロセスの作成と実行 *****
 
@@ -635,12 +644,24 @@ class LiveEncodingTask:
             logging.info(f'[Live: {self.live_stream.live_stream_id}] FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            encoder = await asyncio.subprocess.create_subprocess_exec(
-                *[LIBRARY_PATH['FFmpeg'], *encoder_options],
-                stdin = tsreadex_read_pipe,  # tsreadex からの入力
-                stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                stderr = asyncio.subprocess.PIPE,  # ログ出力
-            )
+            try:
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH['FFmpeg'], *encoder_options],
+                    stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
+            except BaseException:
+                # tsreadex の起動後にエンコーダーの起動に失敗した場合、
+                ## このままでは親プロセスが例外で脱出して tsreadex だけ残留するため、ここで回収する
+                try:
+                    tsreadex.kill()
+                except Exception:
+                    pass
+                raise
+            finally:
+                # tsreadex の読み込み用パイプは子プロセスに渡したので、親プロセス側ではクローズする
+                os.close(tsreadex_read_pipe)
 
         # HWEncC
         else:
@@ -650,15 +671,24 @@ class LiveEncodingTask:
             logging.info(f'[Live: {self.live_stream.live_stream_id}] {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            encoder = await asyncio.subprocess.create_subprocess_exec(
-                *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
-                stdin = tsreadex_read_pipe,  # tsreadex からの入力
-                stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                stderr = asyncio.subprocess.PIPE,  # ログ出力
-            )
-
-        # tsreadex の読み込み用パイプを閉じる
-        os.close(tsreadex_read_pipe)
+            try:
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
+                    stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
+            except BaseException:
+                # tsreadex の起動後にエンコーダーの起動に失敗した場合、
+                ## このままでは親プロセスが例外で脱出して tsreadex だけ残留するため、ここで回収する
+                try:
+                    tsreadex.kill()
+                except Exception:
+                    pass
+                raise
+            finally:
+                # tsreadex の読み込み用パイプは子プロセスに渡したので、親プロセス側ではクローズする
+                os.close(tsreadex_read_pipe)
 
         # ***** チューナーの起動と接続 *****
 
@@ -942,7 +972,7 @@ class LiveEncodingTask:
                             if len(chunk_buffer) >= 65536:
 
                                 # エンコーダーからの出力をライブストリームの Queue に書き込む
-                                await self.live_stream.writeStreamData(bytes(chunk_buffer))
+                                self.live_stream.writeStreamData(bytes(chunk_buffer))
                                 # print(f'Writer:    Chunk size: {len(chunk_buffer):05} / Time: {time.time()}')
 
                                 # チャンクバッファを空にする（重要）
@@ -978,7 +1008,7 @@ class LiveEncodingTask:
                         if (time.monotonic() - chunk_written_at) > 0.025 and (len(chunk_buffer) > 0):
 
                             # エンコーダーからの出力をライブストリームの Queue に書き込む
-                            await self.live_stream.writeStreamData(bytes(chunk_buffer))
+                            self.live_stream.writeStreamData(bytes(chunk_buffer))
                             # print(f'SubWriter: Chunk size: {len(chunk_buffer):05} / Time: {time.time()}')
 
                             # チャンクバッファを空にする（重要）

@@ -34,7 +34,6 @@ psutil = "^6.0.0"
 puremagic = "^1.28"
 py7zr = ">=0.22.0,<1.0.0"
 pydantic = "^2.10.3"
-pymediainfo = "^6.1.0"
 python-jose = {version = "^3.4.0", extras = ["cryptography"]}
 python-multipart = ">=0.0.20,<1.0.0"
 pywin32 = {version = "^311", platform = "win32"}
@@ -99,6 +98,10 @@ lines-after-imports = 2
 [tool.pyright]
 # Python バージョンを指定
 pythonVersion = "3.11"
+# Pyright 実行時に server/.venv/ を確実に参照させる
+# この設定により Codex サンドボックス上から Pyright を実行すると依存関係を解決できない問題を回避できる
+venvPath = "."
+venv = ".venv"
 # TypeCheckingMode を strict に設定（VSCode の設定と同等）
 typeCheckingMode = "strict"
 # プロジェクトルートを指定
@@ -118,7 +121,6 @@ reportConstantRedefinition = "none"
 reportDeprecated = "warning"
 reportMissingTypeStubs = "none"
 reportPrivateImportUsage = "none"
-reportShadowedImports = "none"
 reportUnnecessaryComparison = "none"
 reportUnknownArgumentType = "none"
 reportUnknownMemberType = "none"

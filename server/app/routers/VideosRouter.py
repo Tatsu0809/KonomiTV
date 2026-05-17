@@ -1,10 +1,13 @@
 
+import asyncio
 import json
 import pathlib
+from datetime import datetime
 from email.utils import parsedate
 from typing import Annotated, Any, Literal
 
 import anyio
+from ariblib.sections import TimeOffsetSection
 from fastapi import (
     APIRouter,
     Depends,
@@ -23,6 +26,7 @@ from app import logging, schemas
 from app.constants import STATIC_DIR, THUMBNAILS_DIR
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
+from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
 from app.models.RecordedProgram import RecordedProgram
 from app.models.User import User
 from app.routers.UsersRouter import GetCurrentAdminUser
@@ -746,10 +750,76 @@ async def VideoJikkyoCommentsAPI(
 
         # ニコニコ実況 過去ログ API から一致する過去ログコメントを取得して返す
         jikkyo_client = JikkyoClient(recorded_program.channel.network_id, recorded_program.channel.service_id)
-        return await jikkyo_client.fetchJikkyoComments(
+        jikkyo_comments = await jikkyo_client.fetchJikkyoComments(
             recorded_program.recorded_video.recording_start_time,
             recorded_program.recorded_video.recording_end_time,
         )
+
+        if recorded_program.recorded_video.container_format != 'MPEG-TS' and jikkyo_comments.comments:
+            # PSI/SI の書庫があればそこから動画のカット編集情報を抽出して過去ログコメントのタイミングを調節する
+            # TODO: コメントリストの時刻などは調節前のほうが望ましいので schemas.JikkyoComment に項目を追加すべき
+            def ExtractTOTTimeList() -> list[tuple[float, float, datetime, datetime]]:
+                tot_time_list: list[tuple[float, float, datetime, datetime]] = []
+                psc_path = pathlib.Path(recorded_program.recorded_video.file_path).with_suffix('.psc')
+                try:
+                    with open(psc_path, 'rb') as f:
+                        def callback(time_sec: float, pid: int, section: bytes) -> bool:
+                            tot = TimeOffsetSection(section)
+                            tot_jst_time = tot.JST_time
+                            if tot_jst_time is None:
+                                return False
+                            back = tot_time_list[-1] if len(tot_time_list) > 0 else None
+                            if ((back is not None and (time_sec < back[1] or tot_jst_time < back[3])) or
+                                (back is None and time_sec > 60)):
+                                # 時刻の巻き戻り、または間隔が空きすぎている
+                                return False
+                            if (back is None or
+                                abs((time_sec - back[0]) - (tot_jst_time - back[2]).total_seconds()) > 5):
+                                # PCR と TOT の増分量に差があるので分割する
+                                tot_time_list.append((time_sec, time_sec, tot_jst_time, tot_jst_time))
+                            else:
+                                tot_time_list[-1] = (back[0], time_sec, back[2], tot_jst_time)
+                            return True
+                        # TOT を取り出す
+                        if not TSInfoAnalyzer.readPSIData(f, [0x14], callback):
+                            logging.warning(f'{psc_path}: File contents may be invalid.')
+                            tot_time_list.clear()
+                except Exception:
+                    tot_time_list.clear()
+                return tot_time_list
+
+            tot_time_list = await asyncio.to_thread(ExtractTOTTimeList)
+
+            if len(tot_time_list) >= 2:
+                # TOT 時刻を開始時刻からの相対秒数に変換する
+                offset_list: list[tuple[float, float]] = []
+                first_sec = tot_time_list[0][0]
+                first_tot_time = tot_time_list[0][2]
+                for tot_time in tot_time_list:
+                    offset_list.append(((tot_time[2] - first_tot_time).total_seconds() + first_sec, \
+                                        (tot_time[3] - first_tot_time).total_seconds() + first_sec))
+
+                # 分割部分の時刻をずらして結合する
+                cut_list: list[tuple[float, float, float]] = []
+                shift_sec = tot_time_list[0][0]
+                for i in range(len(tot_time_list) - 1):
+                    next_shift_sec = (tot_time_list[i + 1][0] - tot_time_list[i][1]) / 2
+                    cut_list.append((tot_time_list[i][0] - shift_sec, offset_list[i][0] - shift_sec, offset_list[i][1] + next_shift_sec))
+                    shift_sec = next_shift_sec
+                cut_list.append((tot_time_list[-1][0] - shift_sec, offset_list[-1][0] - shift_sec, offset_list[-1][1] + 60))
+
+                comment_index = 0
+                comments = jikkyo_comments.comments
+                for cut in cut_list:
+                    while comment_index < len(comments) and comments[comment_index].time < cut[1]:
+                        # 範囲外なので消す
+                        comments.pop(comment_index)
+                    while comment_index < len(comments) and comments[comment_index].time < cut[2]:
+                        # タイミングをずらす
+                        comments[comment_index].time -= cut[1] - cut[0]
+                        comment_index += 1
+
+        return jikkyo_comments
 
     # それ以外の場合はエラーを返す
     return schemas.JikkyoComments(
