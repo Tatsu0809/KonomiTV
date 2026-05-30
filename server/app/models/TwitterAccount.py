@@ -3,11 +3,13 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, cast
 
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException, status
 from tortoise import fields
+from tortoise.fields import Field as TortoiseField
 from tortoise.models import Model as TortoiseModel
 
 from app import logging
@@ -15,9 +17,11 @@ from app.constants import (
     TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX,
     TWITTER_ACCOUNT_COOKIE_FERNET,
 )
+from app.schemas import BrowserEnvironmentInfo
 
 
 if TYPE_CHECKING:
+    from app.models.AccountLink import AccountLink
     from app.models.User import User
 
 
@@ -28,6 +32,8 @@ class TwitterAccount(TortoiseModel):
         table: str = 'twitter_accounts'
 
     id = fields.IntField(pk=True)
+    # KonomiTV のユーザーアカウントと Twitter アカウントを紐づける
+    # ユーザー削除時は認証情報を同時に削除すべきなので cascade を指定
     user: fields.ForeignKeyRelation[User] = \
         fields.ForeignKeyField('models.User', related_name='twitter_accounts', on_delete=fields.CASCADE)
     user_id: int
@@ -36,6 +42,13 @@ class TwitterAccount(TortoiseModel):
     icon_url = fields.TextField()
     access_token = fields.TextField()
     access_token_secret = fields.TextField()
+    # Cookie インポート元ブラウザの HTTP ヘッダー / UA-CH / ロケール情報
+    # Cookie と異なり認証情報ではないため、検索性と保守性を優先して JSON のまま保存する
+    cookie_browser_info = cast(TortoiseField[BrowserEnvironmentInfo | None],
+        fields.JSONField(default=None, encoder=lambda x: json.dumps(x, ensure_ascii=False), null=True))  # type: ignore
+    # Bluesky アカウントとの紐付け情報
+    # 未紐付けの場合は空の ReverseRelation として扱われる
+    account_link: fields.ReverseRelation[AccountLink]
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
@@ -85,5 +98,3 @@ class TwitterAccount(TortoiseModel):
             ) from ex
 
         return decrypted_text
-
-
