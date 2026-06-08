@@ -30,7 +30,7 @@
             </v-text-field>
             <v-text-field
                 v-model="excludeKeywordText"
-                label="NOT キーワード"
+                label="除外キーワード"
                 name="program-search-exclude-keyword"
                 color="primary"
                 bg-color="background-lighten-1"
@@ -58,9 +58,12 @@
                 <v-expansion-panel-title>
                     <span class="program-search-filters__panel-title-text">
                         <Icon icon="tabler:category-filled" width="16px" height="16px" />
-                        対象ジャンル
+                        ジャンル指定
                     </span>
-                    <span v-if="isGenreFilterModified" class="program-search-filters__modified-badge">変更あり</span>
+                    <span class="program-search-filters__panel-status-badge"
+                        :class="{ 'program-search-filters__panel-status-badge--modified': isGenreFilterModified }">
+                        {{ genreFilterStatusLabel }}
+                    </span>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text class="program-search-filters__edge-panel">
                     <div class="program-search-filters__checkbox-list">
@@ -118,9 +121,15 @@
                 <v-expansion-panel-title>
                     <span class="program-search-filters__panel-title-text">
                         <Icon icon="ic:round-cell-tower" width="16px" height="16px" />
-                        対象チャンネル
+                        検索対象チャンネル
                     </span>
-                    <span v-if="isChannelFilterModified" class="program-search-filters__modified-badge">変更あり</span>
+                    <span class="program-search-filters__panel-status-badge"
+                        :class="{
+                            'program-search-filters__panel-status-badge--modified': isChannelFilterModified,
+                            'program-search-filters__panel-status-badge--warning': selectedServiceKeys.size === 0,
+                        }">
+                        {{ channelFilterStatusLabel }}
+                    </span>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text class="program-search-filters__edge-panel">
                     <div class="program-search-filters__checkbox-list">
@@ -166,18 +175,29 @@
                         <Icon icon="akar-icons:schedule" width="16px" height="16px" />
                         放送日時
                     </span>
-                    <span v-if="isDateFilterModified" class="program-search-filters__modified-badge">変更あり</span>
+                    <span class="program-search-filters__panel-status-badge"
+                        :class="{ 'program-search-filters__panel-status-badge--modified': isDateFilterModified }">
+                        {{ dateFilterStatusLabel }}
+                    </span>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text>
                     <div class="program-search-filters__date-range-list">
                         <div v-for="(dateRange, index) in dateRanges" :key="dateRange.id"
                             class="program-search-filters__date-range">
                             <div class="program-search-filters__date-range-header">
-                                <span>範囲 {{ index + 1 }}</span>
-                                <button type="button" v-ripple class="program-search-filters__icon-button"
-                                    @click="removeDateRange(index)">
-                                    <Icon icon="fluent:delete-16-filled" width="15px" height="15px" />
-                                </button>
+                                <span>条件 {{ index + 1 }}</span>
+                                <div class="program-search-filters__date-range-actions">
+                                    <button type="button" v-ripple class="program-search-filters__icon-button"
+                                        aria-label="条件を複製"
+                                        @click="copyDateRange(index)">
+                                        <Icon icon="fluent:copy-16-regular" width="15px" height="15px" />
+                                    </button>
+                                    <button type="button" v-ripple class="program-search-filters__icon-button"
+                                        aria-label="条件を削除"
+                                        @click="removeDateRange(index)">
+                                        <Icon icon="fluent:delete-16-filled" width="15px" height="15px" />
+                                    </button>
+                                </div>
                             </div>
                             <div class="program-search-filters__date-row">
                                 <span class="program-search-filters__date-label">開始</span>
@@ -227,7 +247,7 @@
                         <button type="button" v-ripple class="program-search-filters__mini-button program-search-filters__mini-button--wide"
                             @click="addDateRange">
                             <Icon icon="fluent:add-16-filled" width="15px" height="15px" />
-                            日時範囲を追加
+                            日時条件を追加
                         </button>
                     </div>
                     <button type="button" v-ripple
@@ -246,7 +266,10 @@
                         <Icon icon="fluent:clock-12-regular" width="16px" height="16px" />
                         番組長
                     </span>
-                    <span v-if="isDurationFilterModified" class="program-search-filters__modified-badge">変更あり</span>
+                    <span class="program-search-filters__panel-status-badge"
+                        :class="{ 'program-search-filters__panel-status-badge--modified': isDurationFilterModified }">
+                        {{ durationFilterStatusLabel }}
+                    </span>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text>
                     <div class="program-search-filters__duration-grid">
@@ -279,7 +302,10 @@
                         <Icon icon="fluent:money-16-filled" width="16px" height="16px" />
                         無料放送/有料放送
                     </span>
-                    <span v-if="isBroadcastTypeFilterModified" class="program-search-filters__modified-badge">変更あり</span>
+                    <span class="program-search-filters__panel-status-badge"
+                        :class="{ 'program-search-filters__panel-status-badge--modified': isBroadcastTypeFilterModified }">
+                        {{ broadcastTypeFilterStatusLabel }}
+                    </span>
                 </v-expansion-panel-title>
                 <v-expansion-panel-text>
                     <div class="program-search-filters__segmented">
@@ -477,6 +503,74 @@ const isBroadcastTypeFilterModified = computed(() => {
     return localCondition.value.broadcast_type !== 'All';
 });
 
+const genreFilterStatusLabel = computed(() => {
+    // ジャンルは未選択が指定なしなので、チェック数よりも検索条件としての意味を見出しに出す
+    if (selectedGenreKeys.value.size === 0) {
+        return localCondition.value.is_exclude_genre_ranges === true ? '除外オン' : '指定なし';
+    }
+
+    // 大分類すべてが選択されている場合、画面上は配下の中分類すべてが選択済みに見える
+    // このため、見出しの件数は UI 上見えるチェック数に合わせ、増減が直感的に認知できるようにする
+    let selectedGenreCount = 0;
+    selectedGenreKeys.value.forEach((genreKey) => {
+        const { major, middle } = splitGenreKey(genreKey);
+        if (middle !== allGenreMiddleLabel) {
+            selectedGenreCount += 1;
+            return;
+        }
+        const genre = genreOptions.value.find((genreOption) => genreOption.major === major);
+        selectedGenreCount += genre?.middles.length ?? 1;
+    });
+
+    return localCondition.value.is_exclude_genre_ranges === true
+        ? `除外 ${selectedGenreCount}件`
+        : `${selectedGenreCount}件選択`;
+});
+
+const channelFilterStatusLabel = computed(() => {
+    // チャンネルは検索対象そのものなので、全件・0件・一部選択を明示してジャンルとの差を出す
+    if (selectedServiceKeys.value.size === 0) {
+        return '未選択';
+    }
+    if (isChannelFilterModified.value === false) {
+        return 'すべて';
+    }
+    return `${selectedServiceKeys.value.size}件選択`;
+});
+
+const dateFilterStatusLabel = computed(() => {
+    // 日時は0件が指定なしなので、除外だけが入っている状態も見落とさないよう短く示す
+    if (dateRanges.value.length === 0) {
+        return localCondition.value.is_exclude_date_ranges === true ? '除外オン' : '指定なし';
+    }
+    return localCondition.value.is_exclude_date_ranges === true
+        ? `除外 ${dateRanges.value.length}件`
+        : `${dateRanges.value.length}件指定`;
+});
+
+const durationFilterStatusLabel = computed(() => {
+    // 片側だけの番組長指定も有効なので、上下限の入力に合わせて文言を分ける
+    const min = localCondition.value.duration_range_min;
+    const max = localCondition.value.duration_range_max;
+    if (min === null && max === null) {
+        return '指定なし';
+    }
+    if (min !== null && max !== null) {
+        return `${min}〜${max}分`;
+    }
+    if (min !== null) {
+        return `${min}分以上`;
+    }
+    return `${max}分以下`;
+});
+
+const broadcastTypeFilterStatusLabel = computed(() => {
+    // 内部値ではなく、ユーザーが選んだラベルそのものを見出しに出す
+    return broadcastTypeOptions.find((broadcastType) => {
+        return broadcastType.value === localCondition.value.broadcast_type;
+    })?.label ?? 'すべて';
+});
+
 const keywordText = computed({
     get: () => localCondition.value.keyword ?? '',
     set: (value: string | null) => {
@@ -488,7 +582,7 @@ const keywordText = computed({
 const excludeKeywordText = computed({
     get: () => localCondition.value.exclude_keyword ?? '',
     set: (value: string | null) => {
-        // NOT キーワードも文字列スキーマなので、空欄は null ではなく空文字として扱う
+        // 除外キーワードの空欄は null ではなく空文字として扱う
         localCondition.value.exclude_keyword = value ?? '';
     },
 });
@@ -566,10 +660,10 @@ const createDateRangeForm = (dateRange?: IProgramSearchConditionDate): DateRange
     // 追加直後から有効な範囲にしておくと、未入力の半端な条件を API に送る分岐が不要になる
     const nextDateRange = dateRange ?? {
         start_day_of_week: 0,
-        start_hour: 0,
+        start_hour: 22,
         start_minute: 0,
-        end_day_of_week: 6,
-        end_hour: 23,
+        end_day_of_week: 1,
+        end_hour: 3,
         end_minute: 59,
     };
     return {
@@ -798,6 +892,24 @@ const removeDateRange = (index: number) => {
     dateRanges.value = dateRanges.value.filter((_, dateRangeIndex) => dateRangeIndex !== index);
 };
 
+const copyDateRange = (index: number) => {
+    const sourceDateRange = dateRanges.value[index];
+    if (sourceDateRange === undefined) {
+        return;
+    }
+
+    // フォーム ID だけ新規発行し、曜日・時刻の値はそのまま複製する
+    const { id: _sourceId, ...dateRangeValues } = sourceDateRange;
+    const copiedDateRange = createDateRangeForm(dateRangeValues);
+
+    // 元の条件の直後へ挿入し、複製元を見ながら微調整しやすくする
+    dateRanges.value = [
+        ...dateRanges.value.slice(0, index + 1),
+        copiedDateRange,
+        ...dateRanges.value.slice(index + 1),
+    ];
+};
+
 const buildCondition = (): IProgramSearchCondition => {
     const condition = structuredClone(toRaw(localCondition.value));
     condition.is_enabled = true;
@@ -875,7 +987,7 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
     gap: 16px;
     color: rgb(var(--v-theme-text));
     @include tablet-horizontal {
-        width: 270px;
+        width: 275px;
     }
     @include tablet-vertical {
         width: 100%;
@@ -1022,6 +1134,13 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
                 color: rgb(var(--v-theme-primary));
             }
         }
+        :deep(.v-expansion-panel-title__icon) {
+            // Vuetify の矢印も自動余白を持つため、状態チップ側で右寄せを完結させる
+            margin-inline-start: 12px;
+            @include tablet-horizontal {
+                margin-inline-start: 4px;
+            }
+        }
         :deep(.v-expansion-panel-text__wrapper) {
             padding: 12px 14px;
         }
@@ -1035,33 +1154,48 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
     &__panel-title-text {
         display: inline-flex;
         align-items: center;
+        flex: 0 1 auto;
         min-width: 0;
-        gap: 7px;
+        gap: 6px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
 
         svg {
+            flex-shrink: 0;
             color: rgb(var(--v-theme-text-darken-1));
             transition: color 0.15s;
         }
     }
 
-    &__modified-badge {
+    &__panel-status-badge {
         display: inline-flex;
         align-items: center;
         justify-content: center;
         flex-shrink: 0;
         height: 20px;
-        margin-left: 8px;
+        // 見出しの補足情報は閉じた状態でも視線が右端へ流れるよう、矢印の手前へ寄せる
+        margin-left: auto;
         padding: 0px 7px;
-        border: 1px solid rgba(var(--v-theme-primary), 0.55);
+        border: 1px solid rgba(var(--v-theme-text), 0.18);
         border-radius: 999px;
-        color: rgb(var(--v-theme-primary));
-        background: rgba(var(--v-theme-primary), 0.12);
+        color: rgb(var(--v-theme-text-darken-1));
+        background: rgba(var(--v-theme-background), 0.18);
         font-size: 10.5px;
         font-weight: 700;
         line-height: 1;
+
+        &--modified {
+            border-color: rgba(var(--v-theme-primary), 0.55);
+            color: rgb(var(--v-theme-primary));
+            background: rgba(var(--v-theme-primary), 0.12);
+        }
+
+        &--warning {
+            border-color: rgba(var(--v-theme-warning), 0.7);
+            color: rgb(var(--v-theme-warning));
+            background: rgba(var(--v-theme-warning), 0.16);
+        }
     }
 
     &__panel-section {
@@ -1286,7 +1420,8 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
         display: flex;
         flex-direction: column;
         gap: 8px;
-        padding: 10px;
+        padding: 8px;
+        padding-top: 6px;
         border: 1px solid rgba(var(--v-theme-text), 0.12);
         border-radius: 7px;
         background: rgb(var(--v-theme-background-lighten-2));
@@ -1299,6 +1434,12 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
         color: rgb(var(--v-theme-text));
         font-size: 13px;
         font-weight: 700;
+    }
+
+    &__date-range-actions {
+        display: flex;
+        align-items: center;
+        gap: 2px;
     }
 
     &__icon-button {
@@ -1322,7 +1463,7 @@ const handleSearchKeyDown = (event: KeyboardEvent) => {
 
     &__date-row {
         display: grid;
-        grid-template-columns: 34px minmax(0, 1fr) 62px 62px;
+        grid-template-columns: 28px minmax(0, 1fr) 62px 62px;
         align-items: center;
         gap: 6px;
     }

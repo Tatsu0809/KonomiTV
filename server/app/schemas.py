@@ -159,14 +159,13 @@ class RecordedVideo(PydanticModel):
     video_frame_rate: float
     video_resolution_width: int
     video_resolution_height: int
+    has_video_stream_changes: bool = False
     primary_audio_codec: Literal['AAC-LC']
     primary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch']
     primary_audio_sampling_rate: int
     secondary_audio_codec: Literal['AAC-LC'] | None = None
     secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
-    # key_frames はデータ量が多いため、キーフレーム情報を取得できているかを表す has_key_frames のみ返す
-    has_key_frames: bool = False
     cm_sections: list[CMSection] | None = None
     thumbnail_info: ThumbnailInfo | None = None
     created_at: datetime
@@ -175,6 +174,11 @@ class RecordedVideo(PydanticModel):
 class KeyFrame(TypedDict):
     offset: int
     dts: int
+
+class SegmentMapEntry(TypedDict):
+    sequence_index: int
+    source_file_position: int
+    source_start_dts: int
 
 class CMSection(TypedDict):
     start_time: float

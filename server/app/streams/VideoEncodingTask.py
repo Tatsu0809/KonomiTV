@@ -155,8 +155,14 @@ class VideoEncodingTask:
                 options.append(f'-r 60000/1001 -g {int(self.GOP_LENGTH_SECOND * 60)}')
             ## インターレース解除 (60i → 30p (フレームレート: 30fps))
             else:
-                options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
-                options.append(f'-r 30000/1001 -g {int(self.GOP_LENGTH_SECOND * 30)}')
+                # 24fps モードでは、テレシネ由来の重複フレームを取り除いて 24/30p 混合 VFR で出力する
+                ## dejudder を併用すると、24fps 区間の PTS が 41.7ms 間隔に均されて本来の 24fps に近い時刻列になる
+                if self.video_stream.encoding_options.is_24fps_mode_enabled is True:
+                    options.append(f'-vf pullup,dejudder,scale={video_width}:{video_height}')
+                    options.append(f'-fps_mode vfr -g {int(self.GOP_LENGTH_SECOND * 30)}')
+                else:
+                    options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
+                    options.append(f'-r 30000/1001 -g {int(self.GOP_LENGTH_SECOND * 30)}')
         ## プログレッシブ映像
         ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して入力ファイルと同じ fps でエンコードする
         elif self.video_stream.recorded_program.recorded_video.video_scan_type == 'Progressive':
@@ -173,7 +179,7 @@ class VideoEncodingTask:
 
         # 出力
         options.append('-y -f mpegts')  # MPEG-TS 出力ということを明示
-        options.append('pipe:1')  # 標準入力へ出力
+        options.append('pipe:1')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
         result: list[str] = []
@@ -236,7 +242,7 @@ class VideoEncodingTask:
         options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:0')
         options.append(f'-m max_interleave_delta:{max_interleave_delta}K')
         ## QSVEncC と rkmppenc では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
-        if encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc':
+        if (encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc') and not self.video_stream.encoding_options.is_24fps_mode_enabled:
             options.append('--disable-opencl')
         ## NVEncC では NVML によるモニタリングと DX11, Vulkan を無効化することで初期化フェーズを高速化する
         if encoder_type == 'NVEncC':
@@ -297,12 +303,12 @@ class VideoEncodingTask:
         ## バンディング軽減のためのオプション (速度低下を鑑みて当面 NVEncC でのみ有効にする)
         if encoder_type == 'NVEncC':
             options.append('--vpp-deband')
-        ## H.265/HEVC では HW エンコーダーが対応している場合は 10bit でエンコードし、さらにバンディング耐性を高める
-        ## (VCEEncC は 10bit 対応の機種かを判定できず、rkmppenc は 10bit エンコード自体に非対応のため設定しない)
-        ## TODO: 思ったより 10bit HEVC デコードに対応してない Android タブレットが多そうなので個別調整できるようになるまで無効化
-        ## ref: https://github.com/tsukumijima/KonomiTV/pull/164#issuecomment-3368738859
-        # if QUALITY[quality].is_hevc is True and (encoder_type == 'QSVEncC' or encoder_type == 'NVEncC'):
-        #     options.append('--output-depth 10 --fallback-bitdepth')
+        # 通信節約モードでは、HEVC 10bit のデコードに対応したクライアント向けに HEVC 10bit でエンコードし、さらにバンディング耐性を高める
+        ## (VCEEncC は HEVC 10bit 対応の機種かを判定できず、rkmppenc は HEVC 10bit エンコード自体に非対応のため設定しない)
+        ## --fallback-bitdepth により、GPU 側が HEVC 10bit 非対応の場合でも 8bit へフォールバックされる
+        ## 末尾の -10bit は、HEVC 10bit でのエンコードを試すストリームであることだけを表す
+        if QUALITY[quality].is_hevc is True and self.video_stream.encoding_options.is_hevc_10bit_enabled is True:
+            options.append('--output-depth 10 --fallback-bitdepth')
 
         ## インターレース映像のみ
         if self.video_stream.recorded_program.recorded_video.video_scan_type == 'Interlaced':
@@ -325,12 +331,17 @@ class VideoEncodingTask:
             ## NVIDIA GPU は当然ながら Intel の内蔵 GPU よりも性能が高いので、GPU フィルタを使ってもパフォーマンスに問題はないと判断
             ## VCEEncC では --vpp-deinterlace 自体が使えないので、代わりに --vpp-afs を使う (ただし、timestamp を変えないよう coeff_shift=0 を指定する)
             else:
-                if encoder_type == 'QSVEncC':
-                    options.append('--vpp-deinterlace normal')
-                elif encoder_type == 'NVEncC' or encoder_type == 'VCEEncC':
-                    options.append('--vpp-afs preset=default,coeff_shift=0')
-                elif encoder_type == 'rkmppenc':
-                    options.append('--vpp-deinterlace normal_i5')
+                # 24fps モードでは --vpp-afs で 24fps 区間を検出し、24/30p 混合 VFR で出力する
+                ## 通常 30fps 向けの coeff_shift=0 はタイムスタンプを維持するための既存設定なので、フレーム間引きが目的の 24fps モードには付けない
+                if self.video_stream.encoding_options.is_24fps_mode_enabled is True:
+                    options.append('--vpp-afs preset=default,drop=on,smooth=on')
+                else:
+                    if encoder_type == 'QSVEncC':
+                        options.append('--vpp-deinterlace normal')
+                    elif encoder_type == 'NVEncC' or encoder_type == 'VCEEncC':
+                        options.append('--vpp-afs preset=default,coeff_shift=0')
+                    elif encoder_type == 'rkmppenc':
+                        options.append('--vpp-deinterlace normal_i5')
                 options.append(f'--avsync vfr --gop-len {int(self.GOP_LENGTH_SECOND * 30)}')
         ## プログレッシブ映像
         ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して入力ファイルと同じ fps でエンコードする
@@ -359,7 +370,7 @@ class VideoEncodingTask:
 
         # 出力
         options.append('--output-format mpegts')  # MPEG-TS 出力ということを明示
-        options.append('--output -')  # 標準入力へ出力
+        options.append('--output -')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
         result: list[str] = []
@@ -384,6 +395,22 @@ class VideoEncodingTask:
         CONFIG = Config()
         ENCODER_TYPE = CONFIG.general.encoder
 
+        # 映像 PID や映像ストリーム構成が途中で変わる録画（マルチ編成開始/終了での解像度変更時など）に関して、HWEncC 系エンコーダーは
+        # --avhw だと録画マージン区間 -> 本編での解像度切り替えに対応できずクラッシュし、--avsw の場合はエラーこそ出ないがデコードがめちゃくちゃになる問題がある
+        # このため苦肉の策として、メタデータ解析時に映像構成がイレギュラーな TS だと事前に検出した上で、それらの録画ファイルの再生時エンコーダーを FFmpeg に固定する
+        ## FFmpeg (ソフトウェアデコード/エンコード) + tsreadex (映像 PID 固定化) の構成であれば、解像度変化のある TS も問題なくエンコードできるっぽい
+        recorded_video = self.video_stream.recorded_program.recorded_video
+        if (
+            recorded_video.container_format == 'MPEG-TS' and
+            recorded_video.has_video_stream_changes is True and
+            ENCODER_TYPE != 'FFmpeg'
+        ):
+            logging.warning(
+                f'{self.video_stream.log_prefix} FFmpeg will be used because video stream changes were detected. '
+                f'[configured_encoder: {ENCODER_TYPE}]'
+            )
+            ENCODER_TYPE = 'FFmpeg'
+
         # 新しいエンコードタスクを起動させた時点で既にエンコード済みのセグメントは使えなくなるので、すべてリセットする
         for segment in self.video_stream.segments:
             if segment.encode_status != 'Pending':
@@ -395,13 +422,11 @@ class VideoEncodingTask:
         current_segment.encode_status = 'Encoding'
         logging.info(f'{self.video_stream.log_prefix}[Segment {current_sequence}] Starting the Encoder...')
 
-        # エンコーダーに渡す出力 TS のタイムスタンプオフセットを算出
-        output_ts_offset: float = 0.0
-        for kf in self.video_stream.recorded_program.recorded_video.key_frames:
-            # セグメント開始位置よりも後のキーフレームは採用せず、直前の DTS を記録
-            if kf['offset'] > current_segment.start_file_position:
-                break
-            output_ts_offset = kf['dts'] / ts.HZ  # 秒単位
+        # VideoStream 側で解決済みのソース DTS を、エンコーダー出力のタイムスタンプ基準として使う
+        ## ここが未解決の場合は呼び出し順序のバグなので、後続のパイプラインを起動する前に即座に止める
+        if current_segment.source_start_dts is None:
+            raise RuntimeError(f'Source start DTS is not resolved. [sequence: {current_sequence}]')
+        output_ts_offset = current_segment.source_start_dts / ts.HZ
 
         # MPEG-TS 形式の場合のみ、録画ファイルを開く
         # それ以外の場合は一旦 None とする
@@ -571,11 +596,13 @@ class VideoEncodingTask:
                         os.close(psisimux_write_pipe)
                 else:
                     assert file is not None
+                    if current_segment.source_file_position is None:
+                        raise RuntimeError(f'Source file position is not resolved. [sequence: {current_sequence}]')
 
                     # セグメント開始位置から遡る範囲を計算（最大 5000 パケット、ただしファイル先頭は超えない）
                     max_lookback_bytes = 188 * 5000  # 5000 パケット分
-                    search_start_pos = max(0, current_segment.start_file_position - max_lookback_bytes)
-                    search_end_pos = current_segment.start_file_position
+                    search_start_pos = max(0, current_segment.source_file_position - max_lookback_bytes)
+                    search_end_pos = current_segment.source_file_position
 
                     # 探索範囲のデータを読み込む
                     file.seek(search_start_pos)
@@ -617,7 +644,7 @@ class VideoEncodingTask:
 
                         # 現在のパケットの実際のファイル位置
                         current_file_pos = search_start_pos + offset
-                        distance = abs(current_file_pos - current_segment.start_file_position)
+                        distance = abs(current_file_pos - current_segment.source_file_position)
 
                         # PAT (PID 0x00)
                         if pid == 0x00:
@@ -625,7 +652,7 @@ class VideoEncodingTask:
                             for pat in temp_pat_parser:
                                 if pat.CRC32() == 0:
                                     # セグメント開始位置により近い場合、または開始位置以前で最も近い場合は更新
-                                    if current_file_pos <= current_segment.start_file_position:
+                                    if current_file_pos <= current_segment.source_file_position:
                                         # 開始位置以前の PAT を優先（より近いものに更新）
                                         if closest_pat_packet is None or distance < closest_pat_distance:
                                             closest_pat_packet = packet
@@ -651,7 +678,7 @@ class VideoEncodingTask:
                             for pmt in temp_pmt_parser:
                                 if pmt.CRC32() == 0:
                                     # セグメント開始位置により近い場合、または開始位置以前で最も近い場合は更新
-                                    if current_file_pos <= current_segment.start_file_position:
+                                    if current_file_pos <= current_segment.source_file_position:
                                         # 開始位置以前の PMT を優先（より近いものに更新）
                                         if closest_pmt_packet is None or distance < closest_pmt_distance:
                                             closest_pmt_packet = packet
@@ -680,7 +707,7 @@ class VideoEncodingTask:
                         )
 
                     # 実際のセグメント開始位置にシーク
-                    file.seek(current_segment.start_file_position)
+                    file.seek(current_segment.source_file_position)
 
                 # tsreadex のオプション
                 ## 放送波の前処理を行い、エンコードを安定させるツール
@@ -915,7 +942,7 @@ class VideoEncodingTask:
                 encoded_segment = bytearray()
                 # エンコーダーの stdout が常に読める状態でも他の非同期タスクへ定期的に制御を返すためのカウンタ
                 yield_packet_count = 0
-                # セグメント境界を IDR/CRA に合わせるためのフラグ
+                # セグメント境界をランダムアクセスフレームに合わせるためのフラグ
                 is_split_pending = False
 
                 # PTS/DTS の 33bit ラップアラウンドを展開して、DB に保存されている ffprobe の単調増加 DTS に合わせる
@@ -925,8 +952,11 @@ class VideoEncodingTask:
                 first_video_timestamp_33bit: int | None = None
                 last_video_timestamp_33bit: int | None = None
                 wrap_offset_ticks: int = 0
-                # エンコードタスク開始時点のセグメント開始 DTS を保存しておく
-                first_segment_start_dts: int = current_segment.start_dts
+                # エンコードタスク開始時点の入力ソース DTS とプレイリスト時刻を保存しておく
+                ## 以降の分割境界はプレイリスト上の等間隔時刻で判定しつつ、出力タイムスタンプは実ソース DTS に固定する
+                first_segment_source_start_dts = current_segment.source_start_dts
+                first_segment_playlist_start_seconds = current_segment.playlist_start_seconds
+                assert first_segment_source_start_dts is not None
 
                 while True:
                     # エンコードタスクがキャンセルされた場合、処理を中断する
@@ -1026,7 +1056,10 @@ class VideoEncodingTask:
                         video_parser.push(packet)
                         for video in video_parser:
                             # 現在の PES の 33bit タイムスタンプ (DTS 優先, 90kHz)
-                            current_timestamp_33bit = cast(int, video.dts() or video.pts())
+                            dts_value = video.dts()
+                            current_timestamp_33bit = dts_value if dts_value is not None else video.pts()
+                            if current_timestamp_33bit is None:
+                                continue
 
                             # 最初のフレームでアンカーを確定
                             if first_video_timestamp_33bit is None:
@@ -1041,19 +1074,26 @@ class VideoEncodingTask:
 
                             # 単調増加となるよう展開した現在の DTS (DB 上の単調増加 DTS に揃える)
                             assert first_video_timestamp_33bit is not None
-                            current_timestamp_unwrapped = first_segment_start_dts + (current_timestamp_33bit - first_video_timestamp_33bit + wrap_offset_ticks)
+                            current_timestamp_unwrapped = first_segment_source_start_dts + (current_timestamp_33bit - first_video_timestamp_33bit + wrap_offset_ticks)
 
                             # Future がまだ未完了の場合にのみ実行
                             if current_segment is not None:
                                 # 判定に用いる次セグメント開始時刻
-                                next_segment_start_timestamp = current_segment.start_dts + round(current_segment.duration_seconds * ts.HZ)
+                                ## source_start_dts は目標時刻以前のキーフレームに戻るため、境界判定はプレイリスト上の経過時間から逆算する
+                                next_segment_start_timestamp = first_segment_source_start_dts + round(
+                                    (
+                                        current_segment.playlist_start_seconds +
+                                        current_segment.duration_seconds -
+                                        first_segment_playlist_start_seconds
+                                    ) * ts.HZ
+                                )
                                 # logging.debug(
                                 #     f'{self.video_stream.log_prefix} Current Timestamp: {current_timestamp_unwrapped} / '
                                 #     f'Next Segment Start Timestamp: {next_segment_start_timestamp}'
                                 # )
 
-                                # 現在の映像 PES が (H.264: IDR, H.265: IDR/CRA) フレームかを判定
-                                def _has_idr_frame(pes: PES) -> bool:
+                                # 現在の映像 PES が安全に分割できるランダムアクセスフレームかを判定
+                                def _has_random_access_frame(pes: PES) -> bool:
                                     try:
                                         if isinstance(pes, H264PES):
                                             for ebsp in pes.ebsps:
@@ -1063,27 +1103,27 @@ class VideoEncodingTask:
                                         elif isinstance(pes, H265PES):
                                             for ebsp in pes.ebsps:
                                                 nal_unit_type = (ebsp[0] >> 1) & 0x3f
-                                                # biim に合わせて IDR/CRA のみを採用 (BLA は除外)
-                                                if nal_unit_type in (19, 20, 21):
+                                                # H.265 は BLA / IDR / CRA をランダムアクセスフレームとして扱う
+                                                if nal_unit_type in (16, 17, 18, 19, 20, 21):
                                                     return True
                                     except Exception:
                                         pass
                                     return False
-                                has_idr_frame = _has_idr_frame(video)
+                                has_random_access_frame = _has_random_access_frame(video)
 
                                 # 次のセグメントの開始時刻以上になったら、現在のセグメントを確定して次のセグメントへ移行
                                 is_reached_planned_boundary = (current_timestamp_unwrapped >= next_segment_start_timestamp)
                                 is_should_finalize_now = False
                                 if is_split_pending is True:
-                                    # 次に来た (H.264: IDR, H.265: IDR/CRA) フレームで確定する
-                                    if has_idr_frame:
+                                    # 次に来たランダムアクセスフレームで確定する
+                                    if has_random_access_frame:
                                         is_should_finalize_now = True
                                 else:
                                     if is_reached_planned_boundary is True:
-                                        if has_idr_frame:
+                                        if has_random_access_frame:
                                             is_should_finalize_now = True
                                         else:
-                                            # (H.264: IDR, H.265: IDR/CRA) フレームまで現在のセグメントを延長
+                                            # ランダムアクセスフレームまで現在のセグメントを延長
                                             is_split_pending = True
 
                                 # 無事セグメントを安全に分割できる地点に到達したので、現在のセグメントを確定
