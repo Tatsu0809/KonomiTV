@@ -1,6 +1,6 @@
 {
     "name": "KonomiTV",
-    "version": "0.14.0",
+    "version": "0.14.1",
     "private": true,
     "scripts": {
         "akebi": "run-script-os",
@@ -69,9 +69,9 @@
         "run-script-os": "^1.1.6",
         "sass": "1.77.6",
         "typescript": "~5.5.4",
-        "vite": "^5.4.21",
+        "vite": "^6.4.3",
         "vite-plugin-comlink": "^5.0.1",
-        "vite-plugin-pwa": "^0.20.1",
+        "vite-plugin-pwa": "^0.21.2",
         "vite-plugin-vuetify": "^2.0.4",
         "vue-tsc": "^2.0.29"
     },
