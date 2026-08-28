@@ -22,7 +22,7 @@ cleanupOutdatedCaches();
 
 // 通常画面は従来の generateSW と同じく index.html へ戻し、API と Cloudflare の内部 URL は対象から外す
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), {
-    denylist: [/^\/api/, /^\/cdn-cgi/],
+    denylist: [/^\/api/, /^\/cdn-cgi/, /[?&]pwa=false/],
 }));
 
 // 保存済み HLS は /local/offline-videos/ 以下の仮想 URL として CacheStorage から返す
