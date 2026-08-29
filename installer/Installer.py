@@ -1025,7 +1025,7 @@ def Installer(version: str) -> None:
                 args = [
                     'netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=KonomiTV Service', 'description=KonomiTV Windows Service.',
                     'profile=private,public', 'enable=yes', 'action=allow', 'dir=in', 'protocol=TCP',
-                    f'program={install_path "/server/.venv/Scripts/python.exe"}',
+                    f'program={install_path /　"server/.venv/Scripts/python.exe"}',
                 ],
                 stdout = subprocess.DEVNULL,  # 標準出力を表示しない
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
