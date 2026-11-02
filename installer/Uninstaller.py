@@ -124,8 +124,8 @@ def Uninstaller() -> None:
 
     if platform_type == 'Windows':
 
-        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
-        ## Poetry 経由だと Windows で shell 解釈の影響を受け、引数中の記号が崩れる可能性がある
+        # Windows サービス管理スクリプトはパッケージマネージャー経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## 以前 Poetry 経由で実行していた際、Windows で shell 解釈の影響を受けて引数中の記号が崩れる問題があったため
         venv_python_executable_path = uninstall_path / 'server/.venv/Scripts/python.exe'
 
         # Windows サービスを終了
@@ -263,10 +263,11 @@ def Uninstaller() -> None:
     with progress:
         # .git/ 以下の読み取り専用ファイルを削除できるようにする
         # ref: https://stackoverflow.com/a/4829285/17124142
-        def on_rm_error(func: Any, path: str, exc_info: Any):
+        ## Python 3.12 以降は onerror が非推奨になったため、例外オブジェクトを受け取る onexc を使う
+        def on_rm_error(func: Any, path: str, exc: BaseException):
             os.chmod(path, stat.S_IWRITE)
             os.unlink(path)
-        shutil.rmtree(uninstall_path, onerror=on_rm_error)
+        shutil.rmtree(uninstall_path, onexc=on_rm_error)
 
     # アンインストール完了
     ShowPanel([

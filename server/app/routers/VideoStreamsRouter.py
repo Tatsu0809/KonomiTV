@@ -3,7 +3,7 @@ import asyncio
 import json
 import struct
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import Response, StreamingResponse
@@ -11,6 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
 from app import logging
+from app.constants import QUALITY
 from app.models.RecordedProgram import RecordedProgram
 from app.schemas import OfflineVideoStreamMetadata
 from app.streams.StreamEncodingOptions import (
@@ -37,10 +38,11 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
     recorded_program = await RecordedProgram.filter(id=video_id).get_or_none() \
         .select_related('recorded_video') \
         .select_related('channel')
-    if recorded_program is None:
+    # 録画ファイルが見つからなくなった (Missing の) 録画番組は再生できないので、存在しない録画番組と同じく扱う
+    if recorded_program is None or recorded_program.recorded_video.status == 'Missing':
         logging.error(f'[VideoStreamsRouter][ValidateVideoID] Specified video_id was not found. [video_id: {video_id}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified video_id was not found',
         )
 
@@ -56,7 +58,7 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
     if stream_quality is None:
         logging.error(f'[VideoStreamsRouter][ValidateQuality] Specified quality was not found. [quality: {quality}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified quality was not found',
         )
 
@@ -64,7 +66,7 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
     if stream_quality.quality == 'original':
         logging.error(f'[VideoStreamsRouter][ValidateQuality] Original quality is not available for HLS playlist. [quality: {quality}]')
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Original quality is not available for HLS playlist',
         )
 
@@ -87,6 +89,10 @@ async def VideoHLSPlaylistAPI(
     stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
     cache_key: Annotated[str | None, Query(description='キャッシュ制御用のキー。')] = None,
+    playlist_type: Annotated[
+        Literal['master', 'primary-audio', 'secondary-audio'],
+        Query(alias='type', description='プレイリストの種類。'),
+    ] = 'primary-audio',
 ):
     """
     指定された画質に対応する、録画番組のストリーミング用 HLS M3U8 プレイリストを返す。<br>
@@ -103,10 +109,27 @@ async def VideoHLSPlaylistAPI(
         is_new_session_allowed = True,
     )
 
-    # 仮想 HLS M3U8 プレイリストを取得
-    virtual_playlist = video_stream.getVirtualPlaylist(cache_key)
+    # 映像・主音声と副音声は同じエンコード結果を共有し、プレイリストの種類だけをこの API で切り替える
+    if playlist_type == 'master':
+        # MPEG-TS の多重化オーバーヘッドを10%見込み、最大映像と2本分の音声を収容できる帯域幅を宣言する
+        quality = QUALITY[stream_quality.quality]
+        video_bitrate = int(quality.video_bitrate_max.removesuffix('K')) * 1000
+        audio_bitrate = int(quality.audio_bitrate.removesuffix('K')) * 1000
+        bandwidth = round((video_bitrate + audio_bitrate * 2) * 1.1)
+        playlist_uri = f'playlist?session_id={session_id}'
+
+        # tsreadex は副音声のない区間も無音 AAC で補完するため、番組情報に関係なく常に2本の音声トラックを公開する
+        ## 編成の途中から副音声が始まる場合も、利用者の選択を維持したまま再生できる
+        playlist = '#EXTM3U\n#EXT-X-VERSION:6\n'
+        playlist += '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="主音声",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="jpn"\n'
+        playlist += f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="副音声",DEFAULT=NO,AUTOSELECT=YES,LANGUAGE="jpn",URI="{playlist_uri}&type=secondary-audio"\n'
+        playlist += f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AUDIO="audio"\n'
+        playlist += f'{playlist_uri}&type=primary-audio\n'
+    else:
+        audio = 'secondary' if playlist_type == 'secondary-audio' else 'primary'
+        playlist = video_stream.getVirtualPlaylist(cache_key, audio)
     return Response(
-        content = virtual_playlist,
+        content = playlist,
         media_type = 'application/vnd.apple.mpegurl',
         headers = {
             'Cache-Control': 'max-age=0',
@@ -131,6 +154,7 @@ async def VideoHLSSegmentAPI(
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
     sequence: Annotated[int, Query(description='HLS セグメントの 0 スタートのシーケンス番号。')],
     cache_key: Annotated[str | None, Query(description='キャッシュ制御用のキー。')],
+    audio: Annotated[Literal['primary', 'secondary'], Query(description='音声トラック。')] = 'primary',
 ):
     """
     指定された画質に対応する、録画番組のストリーミング用 HLS セグメントを返す。<br>
@@ -143,14 +167,28 @@ async def VideoHLSSegmentAPI(
     video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
 
     # セグメントを取得（キャッシュキーはブラウザキャッシュ避けのための ID なので特に使わない）
-    segment_data = await video_stream.getSegment(sequence)
+    try:
+        segment_data = await video_stream.getSegment(sequence, audio)
+    except ValueError as ex:
+        logging.error(f'{video_stream.log_prefix} Failed to get segment. [sequence: {sequence}, audio: {audio}]', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail = f'Failed to get segment. [audio: {audio}]',
+        ) from ex
+    # エンコードや入力位置の解決に失敗した場合は、再生クライアントへ原因を区別できるレスポンスを返す
+    except RuntimeError as ex:
+        logging.error(f'{video_stream.log_prefix} Failed to generate segment. [sequence: {sequence}, audio: {audio}]', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to generate segment. [audio: {audio}]',
+        ) from ex
     if segment_data is None:
         logging.error(
             f'{video_stream.log_prefix} Specified sequence segment was not found. '
             f'[sequence: {sequence}]'
         )
         raise HTTPException(
-            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code = status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail = 'Specified sequence segment was not found',
         )
 

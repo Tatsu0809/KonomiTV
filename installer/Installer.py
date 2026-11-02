@@ -689,14 +689,15 @@ def Installer(version: str) -> None:
             elif platform_type == 'Linux':
                 # Linux: tar.xz 形式のアーカイブを解凍
                 ## 7-Zip だと (おそらく) ファイルパーミッションを保持したまま圧縮することができない？ため、あえて tar.xz を使っている
+                ## アーカイブ内のパスが展開先の外を指すエントリ (../ や絶対パス) を拒否するため、tar フィルタを指定する
                 with tarfile.open(thirdparty_compressed_file_path, mode='r:xz') as tar_xz:
-                    tar_xz.extractall(install_path / 'server/')
+                    tar_xz.extractall(install_path / 'server/', filter='tar')
             Path(thirdparty_compressed_file_path).unlink()
             # server/thirdparty/.gitkeep が消えてたらもう一度作成しておく
             if Path(install_path / 'server/thirdparty/.gitkeep').exists() is False:
                 Path(install_path / 'server/thirdparty/.gitkeep').touch()
 
-        # ***** poetry 環境の構築 (依存パッケージのインストール) *****
+        # ***** uv による仮想環境の構築 (依存パッケージのインストール) *****
 
         # Python の実行ファイルのパス (Windows と Linux で異なる)
         if platform_type == 'Windows':
@@ -704,24 +705,16 @@ def Installer(version: str) -> None:
         elif platform_type == 'Linux':
             python_executable_path = install_path / 'server/thirdparty/Python/bin/python'
 
-        # poetry env use を実行
-        result = RunSubprocessDirectLogOutput(
-            'Python の仮想環境を作成しています…',
-            [python_executable_path, '-m', 'poetry', 'env', 'use', python_executable_path],
-            cwd = install_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
-            error_message = 'Python の仮想環境の作成中に予期しないエラーが発生しました。',
-        )
-        if result is False:
-            return  # 処理中断
-
-        # poetry install を実行
-        # --no-root: プロジェクトのルートパッケージをインストールしない
+        # uv sync を実行
+        ## サードパーティーライブラリ内の Python を明示的に指定して、server/.venv/ に仮想環境を作成し、依存パッケージをインストールする
+        ## --frozen: uv.lock を更新せず、記録されているバージョンのままインストールする
+        ## --no-dev: 開発時にのみ利用する依存パッケージ (Ruff・Pyright など) をインストールしない
+        ## --link-mode copy: uv のキャッシュとインストール先が別のドライブにあるとハードリンクに失敗して警告が出るため、最初からコピーする
+        ## --python: Python の実行ファイルのパスを指定しているため、uv が別の Python を自動でダウンロードすることはない
         result = RunSubprocessDirectLogOutput(
             '依存パッケージをインストールしています…',
-            [python_executable_path, '-m', 'poetry', 'install', '--only', 'main', '--no-root'],
+            [python_executable_path, '-m', 'uv', 'sync', '--frozen', '--no-dev', '--link-mode', 'copy', '--python', python_executable_path],
             cwd = install_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
             error_message = '依存パッケージのインストール中に予期しないエラーが発生しました。',
         )
         if result is False:
@@ -757,6 +750,16 @@ def Installer(version: str) -> None:
                     '    # devices:\n'
                     '    #   - \'/dev/dri/:/dev/dri/\''
                 )
+                text = text.replace(old_text, new_text)
+
+            # AMD GPU 向けの /dev/kfd が存在する場合、ROCm の OpenCL を Docker コンテナ内で使えるように docker-compose.yaml の当該記述をコメントアウト解除
+            ## VCEEncC が AMD AMF でエンコードする際の OpenCL フィルターは ROCm でしか動作せず、ROCm の動作には /dev/kfd が必要
+            ## /dev/kfd が存在しない環境でコメントアウトを解除するとコンテナが起動できないので、存在する場合のみ有効にする
+            elif Path('/dev/kfd').exists() is True:
+                # デフォルト (置換元) の config.yaml の記述
+                old_text = '      # - \'/dev/kfd:/dev/kfd\''
+                # 置換後の config.yaml の記述
+                new_text = '      - \'/dev/kfd:/dev/kfd\''
                 text = text.replace(old_text, new_text)
 
             # NVEncC が利用できそうな場合、NVIDIA GPU が Docker コンテナ内で使えるように docker-compose.yaml の当該記述をコメントアウト
@@ -948,30 +951,47 @@ def Installer(version: str) -> None:
                 text = True,  # 出力をテキストとして取得する
             )
 
-            # VCEEncC が利用できない結果になった場合はドライバーがインストールされていない or 古い可能性が高いので、
-            # 適宜ドライバーをインストール/アップデートするように催促する
-            ## VCEEncC は AMDGPU-PRO Driver さえインストールされていれば動作する
+            # VCEEncC が利用できない結果になった場合は、VA-API ドライバーなどのユーザーモードドライバーがインストールされていないか、
+            # AMD GPU がカーネルドライバーで認識されていない可能性が高いので、適宜インストール方法を案内する
+            ## VCEEncC は、AMD AMF がインストールされていれば AMF を、なければ Mesa の VA-API ドライバーを自動的に選んで使う
+            ## カーネルドライバーは Linux に標準で含まれている amdgpu を使うため、AMDGPU-PRO Driver のインストールは必須ではない
             if result.returncode != 0:
-                ShowPanel([
-                    '[yellow]注意: この PC では VCEEncC が利用できない状態です。[/yellow]',
-                    'AMD VCE の利用に必要な AMDGPU-PRO Driver がインストールされていないか、',
-                    'AMDGPU-PRO Driver のバージョンが古い可能性があります。',
-                    'AMDGPU-PRO Driver をインストール/最新バージョンに更新してください。',
-                ])
-                ShowPanel([
-                    'AMDGPU-PRO Driver のインストーラーは以下のコマンドでダウンロードできます。',
-                    'Ubuntu 24.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/noble/amdgpu-install_6.4.60404-1_all.deb[/cyan]',
-                    'Ubuntu 22.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/jammy/amdgpu-install_6.4.60404-1_all.deb[/cyan]',
-                ], padding=(0, 2, 0, 2))
-                ShowPanel([
-                    'AMDGPU-PRO Driver は以下のコマンドでインストール/アップデートできます。',
-                    '事前に AMDGPU-PRO Driver のインストーラーをダウンロードしてから実行してください。',
-                    'インストール/アップデート完了後は、システムの再起動が必要です。',
-                    '[cyan]sudo apt install -y ./amdgpu-install_6.4.60404-1_all.deb && sudo apt update && sudo amdgpu-install -y --accept-eula --usecase=graphics,amf,opencl --opencl=rocr --vulkan=amdvlk --no-32[/cyan]',
-                ], padding=(0, 2, 0, 2))
-                ShowPanel([
-                    'VCEEncC のログ:\n' + result.stdout.strip(),
-                ], padding=(0, 2, 0, 2))
+
+                # Linux のみ
+                if platform_type == 'Linux':
+                    ShowPanel([
+                        '[yellow]注意: この PC では VCEEncC が利用できない状態です。[/yellow]',
+                        'VCEEncC の利用に必要な VA-API ドライバーがインストールされていないか、',
+                        'AMD GPU が Linux 標準の amdgpu ドライバーで認識されていない可能性があります。',
+                    ])
+                    ShowPanel([
+                        'VA-API ドライバーと、OpenCL フィルターに使う Mesa の OpenCL (Rusticl) は以下のコマンドでインストールできます。',
+                        'インストール完了後は、システムの再起動が必要です。',
+                        'Ubuntu 24.04 LTS 以降:',
+                        '[cyan]sudo apt update && sudo apt install -y mesa-va-drivers mesa-opencl-icd vainfo clinfo[/cyan]',
+                        'Ubuntu 22.04 LTS の Mesa には Rusticl が含まれていないため、Readme.md に記載の Ubuntu 22.04 LTS 向けの手順を参照してください。',
+                    ], padding=(0, 2, 0, 2))
+                    ShowPanel([
+                        'RDNA 世代以降の AMD GPU では、AMD AMF を追加でインストールすると、VA-API よりも詳細な設定でエンコードできます。',
+                        'AMD AMF のインストール手順は Readme.md を参照してください。',
+                    ], padding=(0, 2, 0, 2))
+                    ShowPanel([
+                        'VCEEncC のログ:\n' + result.stdout.strip(),
+                    ], padding=(0, 2, 0, 2))
+
+                # Linux-Docker のみ
+                ## Linux-Docker では Docker イメージの中に AMF・VA-API のユーザーモードドライバーが含まれているため、
+                ## それでも動作しない場合は、ホスト側で AMD GPU が認識されていない可能性が高い
+                elif platform_type == 'Linux-Docker':
+                    ShowPanel([
+                        '[yellow]注意: この PC では VCEEncC が利用できない状態です。[/yellow]',
+                        'VCEEncC の動作に必要なライブラリは Docker イメージに含まれています。',
+                        'ホスト側で AMD GPU が Linux 標準の amdgpu ドライバーで認識されていない可能性があります。',
+                        '/dev/dri/ 以下に renderD128 などのデバイスファイルが存在するか確認してください。',
+                    ])
+                    ShowPanel([
+                        'VCEEncC のログ:\n' + result.stdout.strip(),
+                    ], padding=(0, 2, 0, 2))
 
         # エンコーダーに rkmppenc が選択されているとき
         elif encoder == 'rkmppenc':
@@ -1020,7 +1040,7 @@ def Installer(version: str) -> None:
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
             )
 
-            # "プライベート" と "パブリック" で有効な受信規則を追加
+            # すべてのプロファイルで有効な受信規則を追加
             subprocess.run(
                 args = [
                     'netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=KonomiTV Service', 'description=KonomiTV Windows Service.',
@@ -1035,51 +1055,51 @@ def Installer(version: str) -> None:
 
     if platform_type == 'Windows':
 
-        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
-        ## Poetry 経由だと Windows で shell 解釈の影響を受け、パスワード中の記号が崩れる可能性がある
+        # Windows サービス管理スクリプトはパッケージマネージャー経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## 以前 Poetry 経由で実行していた際、Windows で shell 解釈の影響を受けてパスワード中の記号が崩れる問題があったため
         venv_python_executable_path = install_path / 'server/.venv/Scripts/python.exe'
 
         # 現在ログオン中のユーザー名を取得
-        ## PowerShell の [Environment]::UserName を使う
+        ## PowerShell の [Environment]::UserDomainName と [Environment]::UserName を使う
         current_user_name_default = subprocess.run(
-            args = ['powershell', '-Command', '[Environment]::UserName'],
+            args = ['powershell', '-Command', r'"$([Environment]::UserDomainName)\$([Environment]::UserName)"'],
             stdout = subprocess.PIPE,  # 標準出力をキャプチャする
             stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
             text = True,  # 出力をテキストとして取得する
         ).stdout.strip()
 
-        table_08 = CreateTable()
-        table_08.add_column('08. KonomiTV の Windows サービスの実行ユーザー名を入力してください。')
-        table_08.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
-        table_08.add_row('ほかのユーザー権限で実行したい場合は、そのユーザー名を入力してください。')
-        table_08.add_row(f'Enter キーを押すと、現在ログオン中のユーザー ({current_user_name_default}) が利用されます。')
-        print(Padding(table_08, (0, 2, 0, 2)))
-
-        # ユーザー名を入力
-        current_user_name: str = CustomPrompt.ask('KonomiTV の Windows サービスの実行ユーザー名', default=current_user_name_default)
-
-        table_09 = CreateTable()
-        table_09.add_column(f'09. ユーザー ({current_user_name}) のパスワードを入力してください。')
-        table_09.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
-        table_09.add_row('入力されたパスワードがそれ以外の用途に利用されることはありません。')
-        table_09.add_row('間違ったパスワードを入力すると、KonomiTV が起動できなくなります。')
-        table_09.add_row('Enter キーを押す前に、正しいパスワードかどうか今一度確認してください。')
-        table_09.add_row('なお、PIN などのほかの認証方法には対応していません。')
-        table_09.add_row(CreateRule())
-        table_09.add_row('ログオン中のユーザーにパスワードを設定していない場合は、簡単なものでいいので')
-        table_09.add_row('何かパスワードを設定してから、その設定したパスワードを入力してください。')
-        table_09.add_row('なお、パスワードの設定後にインストーラーを起動し直す必要はありません。')
-        table_09.add_row(CreateRule())
-        table_09.add_row('ごく稀に、正しいパスワードを指定したのにログオンできない場合があります。')
-        table_09.add_row('その場合は、一度インストーラーを Ctrl+C で中断し、インストーラーの')
-        table_09.add_row('実行ファイルを Shift + 右クリック → [別のユーザーとして実行] から、')
-        table_09.add_row('ログオン中のユーザーとパスワードを指定して再度実行してみてください。')
-        print(Padding(table_09, (1, 2, 1, 2)))
-
-        # ユーザーのパスワードを取得
         while True:
 
-            # 入力プロンプト (サービスのインストールに失敗し続ける限り何度でも表示される)
+            table_08 = CreateTable()
+            table_08.add_column('08. KonomiTV の Windows サービスの実行ユーザー名を入力してください。')
+            table_08.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
+            table_08.add_row('ほかのユーザー権限で実行したい場合は、そのユーザー名を入力してください。')
+            table_08.add_row(f'Enter キーを押すと、現在ログオン中のユーザー ({current_user_name_default}) が利用されます。')
+            print(Padding(table_08, (0, 2, 0, 2)))
+
+            # ユーザー名を入力 (サービスのインストールに失敗し続ける限り何度でも表示される)
+            current_user_name: str = CustomPrompt.ask('KonomiTV の Windows サービスの実行ユーザー名', default=current_user_name_default)
+
+            table_09 = CreateTable()
+            table_09.add_column(f'09. ユーザー ({current_user_name}) のパスワードを入力してください。')
+            table_09.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
+            table_09.add_row('入力されたパスワードがそれ以外の用途に利用されることはありません。')
+            table_09.add_row('間違ったパスワードを入力すると、KonomiTV が起動できなくなります。')
+            table_09.add_row('Enter キーを押す前に、正しいパスワードかどうか今一度確認してください。')
+            table_09.add_row('なお、PIN などのほかの認証方法には対応していません。')
+            table_09.add_row(CreateRule())
+            table_09.add_row('ログオン中のユーザーにパスワードを設定していない場合は、簡単なものでいいので')
+            table_09.add_row('何かパスワードを設定してから、その設定したパスワードを入力してください。')
+            table_09.add_row('なお、パスワードの設定後にインストーラーを起動し直す必要はありません。')
+            table_09.add_row(CreateRule())
+            table_09.add_row('ごく稀に、正しいパスワードを指定したのにログオンできない場合があります。')
+            table_09.add_row('その場合は、一度インストーラーを Ctrl+C で中断し、インストーラーの')
+            table_09.add_row('実行ファイルを Shift + 右クリック → [別のユーザーとして実行] から、')
+            table_09.add_row('ログオン中のユーザーとパスワードを指定して再度実行してみてください。')
+            print(Padding(table_09, (1, 2, 1, 2)))
+
+            # ユーザーのパスワードを取得
+            # 入力プロンプト
             ## バリデーションのしようがないので、バリデーションは行わない
             current_user_password = CustomPrompt.ask(f'ログオン中のユーザー ({current_user_name}) のパスワード')
 
@@ -1103,12 +1123,25 @@ def Installer(version: str) -> None:
                     stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
                     text = True,  # 出力をテキストとして取得する
                 )
+            if 'Error: ' in service_install_result.stdout:
+                print(Padding(
+                    '[red]Windows サービスのインストールに失敗しました。\n'\
+                    '入力されたユーザーが存在しないか、コンピューター名または\n'\
+                    'ドメイン名が間違っている可能性があります。\n'\
+                    'ユーザーが存在するにもかかわらず失敗する場合は、コンピューター名\n'\
+                    'またはドメイン名を明示してユーザー名を入力してみてください。\n'\
+                    '例: コンピューター名\\ユーザー名、.\\ユーザー名 (ローカル)\n'\
+                    '　　ドメイン名\\ユーザー名 (ドメイン)'\
+                , (1, 2, 0, 2)))
+                print(Padding('[red]エラーログ:\n' + service_install_result.stdout.strip(), (1, 2, 1, 2)))
+                continue
+
             if 'Error installing service' in service_install_result.stdout:
-                print(Padding(str(
-                    '[red]Windows サービスのインストールに失敗しました。\n'
-                    '入力されたログオン中ユーザーのパスワードが間違っているか、\n'
-                    'すでに KonomiTV がインストールされている可能性があります。',
-                ), (1, 2, 0, 2)))
+                print(Padding(
+                    '[red]Windows サービスのインストールに失敗しました。\n'\
+                    '入力されたログオン中ユーザーのパスワードが間違っているか、\n'\
+                    'すでに KonomiTV がインストールされている可能性があります。'\
+                , (1, 2, 0, 2)))
                 print(Padding('[red]エラーログ:\n' + service_install_result.stdout.strip(), (1, 2, 1, 2)))
                 continue
 
@@ -1125,11 +1158,11 @@ def Installer(version: str) -> None:
                     text = True,  # 出力をテキストとして取得する
                 )
             if 'Error starting service' in service_start_result.stdout:
-                print(Padding(str(
-                    '[red]Windows サービスの起動に失敗しました。\n'
-                    '入力されたログオン中ユーザーのパスワードが間違っているか、\n'
-                    'すでに KonomiTV がインストールされている可能性があります。',
-                ), (1, 2, 0, 2)))
+                print(Padding(
+                    '[red]Windows サービスの起動に失敗しました。\n'\
+                    '入力されたログオン中ユーザーのパスワードが間違っているか、\n'\
+                    'すでに KonomiTV がインストールされている可能性があります。'\
+                , (1, 2, 0, 2)))
                 print(Padding('[red]エラーログ:\n' + service_start_result.stdout.strip(), (1, 2, 1, 2)))
                 continue
 

@@ -68,7 +68,8 @@ class CMSectionsDetector:
                 # CM 区間情報を更新
                 # 検出できなかった場合も必ず [] を設定する
                 db_recorded_video.cm_sections = cm_sections
-                await db_recorded_video.save()
+                # 読み込んでから書き込むまでの間にほかの処理が書き込んだ列 (サムネイル情報の revision など) を残すよう、CM 区間の列だけを書き込む
+                await db_recorded_video.save(update_fields=['cm_sections', 'updated_at'])
                 if len(cm_sections) > 0:
                     logging.info(f'{self.file_path}: Saved {len(cm_sections)} CM sections. ({time.time() - start_time:.2f} sec)')
                 else:
@@ -198,7 +199,7 @@ class CMSectionsDetector:
 
 if __name__ == "__main__":
     # デバッグ用: 録画ファイルの CM 区間を検出する
-    # Usage: poetry run python -m app.metadata.CMSectionsDetector /path/to/recorded_file.ts
+    # Usage: uv run python -m app.metadata.CMSectionsDetector /path/to/recorded_file.ts
     def main(
         file_path: pathlib.Path = typer.Argument(
             ...,

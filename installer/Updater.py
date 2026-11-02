@@ -143,8 +143,8 @@ def Updater(version: str) -> None:
     venv_python_executable_path: str | Path = ''
     if platform_type == 'Windows':
         python_executable_path = update_path / 'server/thirdparty/Python/python.exe'
-        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
-        ## Poetry 経由だと Windows で shell 解釈の影響を受け、引数中の記号が崩れる可能性がある
+        # Windows サービス管理スクリプトはパッケージマネージャー経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## 以前 Poetry 経由で実行していた際、Windows で shell 解釈の影響を受けて引数中の記号が崩れる問題があったため
         venv_python_executable_path = update_path / 'server/.venv/Scripts/python.exe'
     elif platform_type == 'Linux':
         python_executable_path = update_path / 'server/thirdparty/Python/bin/python'
@@ -239,7 +239,7 @@ def Updater(version: str) -> None:
         revision = 'zero-trust' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを更新しています…',
-            ['git', 'checkout', '--force', revision],
+            checkout_args,
             cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
             error_message = 'KonomiTV のソースコードの更新中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
@@ -268,6 +268,7 @@ def Updater(version: str) -> None:
         Path(update_path / 'server/poetry.lock').unlink(missing_ok=True)
         Path(update_path / 'server/poetry.toml').unlink(missing_ok=True)
         Path(update_path / 'server/pyproject.toml').unlink(missing_ok=True)
+        Path(update_path / 'server/uv.lock').unlink(missing_ok=True)
         Path(update_path / '.dockerignore').unlink(missing_ok=True)
         Path(update_path / '.editorconfig').unlink(missing_ok=True)
         Path(update_path / '.gitignore').unlink(missing_ok=True)
@@ -399,8 +400,9 @@ def Updater(version: str) -> None:
             elif platform_type == 'Linux':
                 # Linux: tar.xz 形式のアーカイブを解凍
                 ## 7-Zip だと (おそらく) ファイルパーミッションを保持したまま圧縮することができない？ため、あえて tar.xz を使っている
+                ## アーカイブ内のパスが展開先の外を指すエントリ (../ や絶対パス) を拒否するため、tar フィルタを指定する
                 with tarfile.open(thirdparty_compressed_file_path, mode='r:xz') as tar_xz:
-                    tar_xz.extractall(update_path / 'server/')
+                    tar_xz.extractall(update_path / 'server/', filter='tar')
             Path(thirdparty_compressed_file_path).unlink()
             # server/thirdparty/.gitkeep が消えてたらもう一度作成しておく
             if Path(update_path / 'server/thirdparty/.gitkeep').exists() is False:
@@ -411,24 +413,16 @@ def Updater(version: str) -> None:
         # すでに仮想環境があると稀に更新がうまく行かないことがあるため、アップデート毎に作り直す
         shutil.rmtree(update_path / 'server/.venv/', ignore_errors=True)
 
-        # poetry env use を実行
-        result = RunSubprocessDirectLogOutput(
-            'Python の仮想環境を作成しています…',
-            [python_executable_path, '-m', 'poetry', 'env', 'use', python_executable_path],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
-            error_message = 'Python の仮想環境の作成中に予期しないエラーが発生しました。',
-        )
-        if result is False:
-            return  # 処理中断
-
-        # poetry install を実行
-        # --no-root: プロジェクトのルートパッケージをインストールしない
+        # uv sync を実行
+        ## サードパーティーライブラリ内の Python を明示的に指定して、server/.venv/ に仮想環境を作成し、依存パッケージをインストールする
+        ## --frozen: uv.lock を更新せず、記録されているバージョンのままインストールする
+        ## --no-dev: 開発時にのみ利用する依存パッケージ (Ruff・Pyright など) をインストールしない
+        ## --link-mode copy: uv のキャッシュとインストール先が別のドライブにあるとハードリンクに失敗して警告が出るため、最初からコピーする
+        ## --python: Python の実行ファイルのパスを指定しているため、uv が別の Python を自動でダウンロードすることはない
         result = RunSubprocessDirectLogOutput(
             '依存パッケージを更新しています…',
-            [python_executable_path, '-m', 'poetry', 'install', '--only', 'main', '--no-root'],
+            [python_executable_path, '-m', 'uv', 'sync', '--frozen', '--no-dev', '--link-mode', 'copy', '--python', python_executable_path],
             cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
             error_message = '依存パッケージの更新中に予期しないエラーが発生しました。',
         )
         if result is False:
@@ -436,6 +430,30 @@ def Updater(version: str) -> None:
 
     # Linux-Docker: Docker イメージを再ビルド
     elif platform_type == 'Linux-Docker':
+
+        # AMD GPU 向けの /dev/kfd が存在する場合、ROCm の OpenCL を Docker コンテナ内で使えるように docker-compose.yaml へマウント設定を追加
+        ## VCEEncC が AMD AMF でエンコードする際の OpenCL フィルターは ROCm でしか動作せず、ROCm の動作には /dev/kfd が必要
+        ## 以前のバージョンのインストーラーが生成した docker-compose.yaml には /dev/kfd の記述自体がないため、/dev/dri/ のマウント設定の直後に追加する
+        ## /dev/dri/ のマウント設定をユーザーがコメントアウトしている場合は、ユーザーの設定を尊重して何もしない
+        if Path('/dev/kfd').exists() is True:
+            with open(update_path / 'docker-compose.yaml', encoding='utf-8') as file:
+                text = file.read()
+            dri_device_line = '      - \'/dev/dri/:/dev/dri/\''
+            kfd_device_line = '      - \'/dev/kfd:/dev/kfd\''
+            commented_kfd_device_line = '      # - \'/dev/kfd:/dev/kfd\''
+            new_text = text
+            # /dev/dri/ のマウント設定が有効な場合のみ処理する
+            if dri_device_line in text:
+                # 現在の docker-compose.example.yaml から生成した docker-compose.yaml で、/dev/kfd の記述がコメントアウトされている場合
+                if commented_kfd_device_line in text:
+                    new_text = text.replace(commented_kfd_device_line, kfd_device_line)
+                # 以前のバージョンから生成した docker-compose.yaml で、/dev/kfd の記述自体がない場合
+                elif kfd_device_line not in text:
+                    new_text = text.replace(dri_device_line, f'{dri_device_line}\n{kfd_device_line}')
+            # 内容が変わった場合のみ docker-compose.yaml を書き換える
+            if new_text != text:
+                with open(update_path / 'docker-compose.yaml', mode='w', encoding='utf-8') as file:
+                    file.write(new_text)
 
         # docker compose build --no-cache --pull で Docker イメージをビルド
         ## 万が一以前ビルドしたキャッシュが残っていたときに備え、キャッシュを使わずにビルドさせる
