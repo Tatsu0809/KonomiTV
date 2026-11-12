@@ -1,27 +1,30 @@
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from io import BufferedReader, BytesIO
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 import ariblib
 import ariblib.event
 from ariblib.descriptors import (
     AudioComponentDescriptor,
+    BroadcastIdDescriptor,
     ServiceDescriptor,
     TSInformationDescriptor,
 )
-from ariblib.packet import payload, payload_unit_start_indicator, pid
+from ariblib.packet import pid
 from ariblib.sections import (
     ActualNetworkNetworkInformationSection,
     ActualStreamPresentFollowingEventInformationSection,
     ActualStreamServiceDescriptionSection,
     ProgramAssociationSection,
     ProgramMapSection,
+    SelectionInformationSection,
     TimeOffsetSection,
 )
+from ariblib.syntax import Syntax
 from biim.mpeg2ts import ts
 
 from app import logging, schemas
@@ -68,7 +71,9 @@ class TSInfoAnalyzer:
         # 録画ファイルが MPEG-TS 形式の場合
         if self.recorded_video.container_format == 'MPEG-TS':
             # TS ファイルを開く
-            ## 188 * 10000 バイト (≒ 1.88MB) ごとに分割して読み込む
+            ## TS パケット 10000 個 (188 バイトのパケットなら ≒ 1.88MB) ごとに分割して読み込む
+            ## ariblib は、BD に BDAV 形式で記録された録画 (.m2ts) の 192 バイトのパケットも自動で判定し、
+            ## 先頭の4バイトの TP_extra_header を取り除いた 188 バイトのパケットとして読み込む (判定結果は self.ts.packet_size)
             ## 現状 ariblib は先頭が sync_byte でない or 途中で同期が壊れる (破損した TS パケットが存在する) TS ファイルを想定していないため、
             ## ariblib に入力する録画ファイルは必ず正常な TS ファイルである必要がある
             self.ts = ariblib.tsopen(self.recorded_video.file_path, chunk=10000)
@@ -89,8 +94,9 @@ class TSInfoAnalyzer:
                         nonlocal last_time_sec, last_tot_time_sec
                         last_time_sec = time_sec
                         if pid in (0x12, 0x26, 0x27):
-                            # EIT は 20% の位置から 60 秒間だけ
-                            if time_sec < self.recorded_video.duration * 0.2 or time_sec > self.recorded_video.duration * 0.2 + 60:
+                            # EIT は 20% の位置から末尾まで
+                            ## 放送時間未定で始まった番組の番組長は途中で確定するため、確定した番組長を後ろの EIT から探せるようにする
+                            if time_sec < self.recorded_video.duration * 0.2:
                                 return True
                         elif pid == 0x14:
                             # 録画時刻の解析の精度を上げるため
@@ -127,17 +133,9 @@ class TSInfoAnalyzer:
             except Exception:
                 pass
 
-            # TODO: 物理ファイル以外を受け取れるよう ariblib を変更すべき
-            # このやり方は ariblib の内部実装を仮定しているのでよくない
-            class TransportStreamFileWorkaround(ariblib.TransportStreamFile):
-                def __init__(self, stream: Any):
-                    BufferedReader.__init__(self, stream)
-                    self.chunk_size = 1
-                    self._callbacks = dict()
-
             # コンストラクタは失敗しない設計なので packets が空でも入力する
             # ここで self.end_ts_offset に 0 がセットされた時、TSInfoAnalyzer.analyze() は常に None を返す
-            self.ts = TransportStreamFileWorkaround(BytesIO(packets))
+            self.ts = ariblib.tsopen(BytesIO(packets), chunk=1)
             self.end_ts_offset = len(packets)
 
 
@@ -196,93 +194,45 @@ class TSInfoAnalyzer:
         """
         TOT (Time Offset Table) から録画開始時刻と録画終了時刻を解析する
         このメソッドは MPEG-TS / PSI/SI 書庫 (.psc) の両方に対応する
+        TOT を含まない BD に記録された録画 (パーシャル TS) では、SIT (Selection Information Table) の現在時刻を使う
 
         Returns:
             tuple[datetime, datetime]: 録画開始時刻と録画終了時刻 (取得できなかった場合は None)
         """
 
-        # MPEG-TS の場合: ariblib.packet のユーティリティと TimeOffsetSection を使って単一パスで解析する
+        # MPEG-TS の場合: TOT の送出時刻から、TOT が届くまでの経過時間を引いて録画開始時刻を求める
         if self.recorded_video.container_format == 'MPEG-TS':
             try:
                 # 誤動作防止のため必ず最初にシークを戻す
                 self.ts.seek(0)
 
-                buffer = bytearray()
-                first_pcr_sec: float | None = None
-                current_pcr_sec: float | None = None
-                # PSI セクション開始時点 (PUSI) の PCR 値を保持し、そのセクションに対する経過時間算出に用いる
-                pcr_at_section_start_sec: float | None = None
+                # 録画開始時点の PCR として、ファイルの最初に現れる PCR を取得する
+                ## pcrs() は PCR をマイクロ秒単位の timedelta で返すため、90kHz 単位の値に戻して扱う
+                ## (90kHz の1単位は約 11 マイクロ秒なので、丸めれば元の値に戻る)
+                first_pcr_timedelta = next(self.ts.pcrs(), None)
+                if first_pcr_timedelta is None:
+                    return None
+                first_pcr = round(first_pcr_timedelta.total_seconds() * ts.HZ)
 
-                # end_ts_offset 以降はゼロ埋めである可能性が高いため、読み取りを制限する
-                read_bytes = 0
-                while True:
-                    packet = self.ts.read(ts.PACKET_SIZE)
-                    if packet is None or len(packet) < ts.PACKET_SIZE:
-                        break
-                    read_bytes += ts.PACKET_SIZE
-                    if read_bytes > self.end_ts_offset:
-                        break
-
-                    # PCR を追跡
-                    pcr_val = ts.pcr(packet)
-                    if pcr_val is not None:
-                        current_pcr_sec = pcr_val / ts.HZ
-                        if first_pcr_sec is None:
-                            first_pcr_sec = current_pcr_sec
-
-                    # TOT (PID 0x14) のセクション組み立て
-                    if pid(packet) != 0x14:
-                        continue
-
-                    prev, current = payload(packet)
-                    if payload_unit_start_indicator(packet):
-                        # まず、直前まで構築していたセクションを prev で完結させる
-                        if buffer:
-                            buffer.extend(prev)
-                        # セクション長に従い切り出して TimeOffsetSection として解釈
-                        while buffer and buffer[0] != 0xFF:
-                            try:
-                                if buffer[0] == 0x73:  # TimeOffsetSection の table_id
-                                    section = TimeOffsetSection(buffer[:])
-                                    if section.isfull():
-                                        # 経過時間は「当該セクションの開始時 PCR - 最初の PCR」で算出する
-                                        if (first_pcr_sec is not None) and (pcr_at_section_start_sec is not None):
-                                            elapsed = max(float(pcr_at_section_start_sec) - float(first_pcr_sec), 0.0)
-                                            assert section.JST_time is not None
-                                            jst_time = NormalizeToJSTDatetime(section.JST_time)
-                                            recording_start_time = jst_time - timedelta(seconds=elapsed)
-                                            recording_end_time = recording_start_time + timedelta(seconds=self.recorded_video.duration)
-                                            return (recording_start_time, recording_end_time)
-                                # 次セクションへ
-                                next_start = ((buffer[1] & 0x0F) << 8 | buffer[2]) + 3
-                                buffer[:] = buffer[next_start:]
-                            except Exception:
-                                break
-                        # 新しいセクション (current) を開始する。開始時点の PCR を保存する
-                        buffer[:] = current
-                        pcr_at_section_start_sec = current_pcr_sec
-                    elif not buffer:
-                        continue
+                self.ts.seek(0)
+                for tot in self.ts.sections(TimeOffsetSection, SelectionInformationSection):
+                    # BD に BDAV 形式で記録された録画 (パーシャル TS) は TOT を含まない
+                    ## 代わりに、SIT のパーシャルトランスポートストリームタイム記述子に、TOT と同じく数秒ごとに進む現在時刻 (JST_time) が入っている
+                    ## ariblib の jst_time は、記述子のオフセット時間を適用した現在時刻を返す
+                    tot_jst_time: datetime | None = None
+                    if isinstance(tot, SelectionInformationSection):
+                        tot_jst_time = tot.jst_time
                     else:
-                        buffer.extend(current)
-
-                # 残ったバッファを片付ける
-                if buffer and buffer[0] == 0x73:
-                    try:
-                        section = TimeOffsetSection(buffer[:])
-                        if section.isfull():
-                            # ファイル末尾でセクションが完結した場合も、当該セクション開始時の PCR を使う
-                            if (first_pcr_sec is None) or (pcr_at_section_start_sec is None):
-                                pass
-                            else:
-                                elapsed = max(float(pcr_at_section_start_sec) - float(first_pcr_sec), 0.0)
-                                assert section.JST_time is not None
-                                jst_time = NormalizeToJSTDatetime(section.JST_time)
-                                recording_start_time = jst_time - timedelta(seconds=elapsed)
-                                recording_end_time = recording_start_time + timedelta(seconds=self.recorded_video.duration)
-                                return (recording_start_time, recording_end_time)
-                    except Exception:
-                        pass
+                        tot_jst_time = tot.JST_time
+                    # TOT の先頭を含むパケットより前に PCR が現れていない場合は、経過時間を求められないため次の TOT を使う
+                    if tot.pcr is None or tot_jst_time is None:
+                        continue
+                    # 経過時間は「TOT の先頭を含むパケットの時点の PCR - 最初の PCR」で算出する
+                    elapsed = max(tot.pcr / ts.HZ - first_pcr / ts.HZ, 0.0)
+                    jst_time = NormalizeToJSTDatetime(tot_jst_time)
+                    recording_start_time = jst_time - timedelta(seconds=elapsed)
+                    recording_end_time = recording_start_time + timedelta(seconds=self.recorded_video.duration)
+                    return (recording_start_time, recording_end_time)
 
             except Exception as ex:
                 logging.warning(f'{self.recorded_video.file_path}: Failed to analyze TOT from TS:', exc_info=ex)
@@ -299,6 +249,8 @@ class TSInfoAnalyzer:
             first_tot_time: datetime | None = None
             last_tot_time: datetime | None = None
             for tot in self.ts.sections(TimeOffsetSection):
+                if tot.JST_time is None:
+                    continue
                 if first_tot_time is None:
                     first_tot_time = NormalizeToJSTDatetime(tot.JST_time)
                 last_tot_time = NormalizeToJSTDatetime(tot.JST_time)
@@ -374,7 +326,39 @@ class TSInfoAnalyzer:
             service_id = service_id_order[0]
 
         # TS から SDT (Service Description Table) を抽出
-        for sdt in self.ts.sections(ActualStreamServiceDescriptionSection):
+        ## BD に BDAV 形式で記録された録画 (パーシャル TS) は SDT・NIT を含まないため、代わりに SIT を抽出する
+        is_partial_ts = False
+        for sdt in self.ts.sections(ActualStreamServiceDescriptionSection, SelectionInformationSection):
+            # パーシャル TS の SIT のサービスのループには、元の放送の各種 ID (放送 ID 記述子) とサービス記述子が入っている
+            if isinstance(sdt, SelectionInformationSection):
+                is_partial_ts = True
+                for service in sdt.services:
+                    # service_id が PAT から抽出したものと一致した場合のみ
+                    if service.service_id != service_id:
+                        continue
+                    broadcast_ids = service.descriptors.get(BroadcastIdDescriptor, [])
+                    service_descriptors = service.descriptors.get(ServiceDescriptor, [])
+                    if len(broadcast_ids) == 0 or len(service_descriptors) == 0:
+                        continue
+                    # ネットワーク ID とトランスポートストリーム ID は、SDT と同じく元の放送の値を使う
+                    network_id = broadcast_ids[0].original_network_id
+                    transport_stream_id = broadcast_ids[0].transport_stream_id
+                    channel_name = TSInformation.formatString(service_descriptors[0].service_name)
+                    break
+                else:
+                    continue
+                # 地デジのリモコン番号は、NIT の代わりに SIT の伝送情報のループの TS 情報記述子に入っている
+                for ts_information in sdt.transmission_info_descriptors.get(TSInformationDescriptor, []):
+                    remocon_id = ts_information.remote_control_key_id
+                    break
+                # サービス種別 (=チャンネルタイプ) を取得
+                network_type = TSInformation.getNetworkType(network_id)
+                if network_type == 'OTHER':
+                    logging.warning(f'{self.recorded_video.file_path}: Unknown network_id: {network_id}')
+                    return None
+                channel_type = network_type
+                break
+
             # ネットワーク ID とサービス種別 (=チャンネルタイプ) を取得
             network_id = int(sdt.original_network_id)
             network_type = TSInformation.getNetworkType(network_id)
@@ -412,18 +396,20 @@ class TSInfoAnalyzer:
         # リモコン番号を取得
         if channel_type == 'GR':
             ## 地デジ: TS から NIT (Network Information Table) を抽出
-            for nit in self.ts.sections(ActualNetworkNetworkInformationSection):
-                # NIT に含まれるトランスポートストリームごとの情報を取得
-                for transport_stream in nit.transport_streams:
-                    # NIT から得られる TSInformationDescriptor 内の情報からリモコンキー ID を取得
-                    # 地デジのみで、BS には TSInformationDescriptor 自体が存在しない
-                    for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
-                        remocon_id = int(ts_information.remote_control_key_id)
+            ## パーシャル TS は NIT を含まず、リモコン番号は SIT から取得済みなので、NIT を探さない
+            if is_partial_ts is False:
+                for nit in self.ts.sections(ActualNetworkNetworkInformationSection):
+                    # NIT に含まれるトランスポートストリームごとの情報を取得
+                    for transport_stream in nit.transport_streams:
+                        # NIT から得られる TSInformationDescriptor 内の情報からリモコンキー ID を取得
+                        # 地デジのみで、BS には TSInformationDescriptor 自体が存在しない
+                        for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
+                            remocon_id = int(ts_information.remote_control_key_id)
+                            break
                         break
+                    else:
+                        continue
                     break
-                else:
-                    continue
-                break
             if remocon_id is None:
                 remocon_id = 0  # リモコン番号を取得できなかった際は 0 が自動設定される
         else:
@@ -492,13 +478,13 @@ class TSInfoAnalyzer:
         # 誤動作防止のため必ず最初にシークを戻す
         if self.recorded_video.container_format == 'MPEG-TS':
             # MPEG-TS 形式の場合、有効な TS データの終了位置から換算して 20% の位置にシークする
-            # (正確には TS パケットサイズに合わせて 188 の倍数になるように調整している)
+            # (正確にはファイル上の TS パケットサイズ (188 または 192) の倍数になるように調整している)
             # 先頭にシークすると録画開始マージン分のデータを含んでしまうため、大体録画開始マージン分を除いた位置から始める
             # 極端に録画開始マージンが大きいか番組長が短い録画でない限り、録画対象の番組が放送されているタイミングにシークできるはず
             # 例えば30分10秒の録画 (前後5秒が録画マージン) の場合、全体の 20% の位置にシークすると大体6分2秒の位置になる
             # 生の録画データはビットレートが一定のため、シーンによって大きくデータサイズが変動することはない
             # 録画中はファイルアロケーションの関係でファイル後半がゼロ埋めされている場合があるため、ファイルサイズではなく end_ts_offset を使う必要がある
-            self.ts.seek(ClosestMultiple(int(self.end_ts_offset * 0.2), ts.PACKET_SIZE))
+            self.ts.seek(ClosestMultiple(int(self.end_ts_offset * 0.2), self.ts.packet_size))
         else:
             # MPEG-TS 形式ではない場合、PSI/SI 書庫から生成した仮想 TS ファイルの先頭にシークする
             self.ts.seek(0)
@@ -518,27 +504,57 @@ class TSInfoAnalyzer:
         secondary_audio_type: str | None = None
         secondary_audio_language: str | None = None
 
+        # 番組情報を取得する EIT のサービス ID
+        ## 地デジのワンセグ (部分受信サービス) の番組情報は L-EIT (PID 0x27) で送られるが、
+        ## psisiarc の "arib-data" で作成した PSI/SI 書庫は L-EIT を含まない
+        ## ワンセグはフルセグと同じ番組を放送しているため、フルセグのサービスの EIT も番組情報として使う
+        ## 地デジのサービス ID のサービス種別 (0x0180 のビット) が 3 (部分受信サービス) なら、0 (テレビ型) にした ID がフルセグのサービス
+        eit_service_ids = {channel.service_id}
+        if channel.type == 'GR' and (channel.service_id & 0x0180) == 0x0180:
+            eit_service_ids.add(channel.service_id & ~0x0180)
+
         # TS から EIT (Event Information Table) を抽出
         count: int = 0
         corrupted_events: int = 0  # 破損したイベント数をカウント
-        for eit in self.ts.sections(ActualStreamPresentFollowingEventInformationSection):
+        ## BD に BDAV 形式で記録された録画 (パーシャル TS) は EIT を含まないため、代わりに SIT を抽出する
+        for eit in self.ts.sections(ActualStreamPresentFollowingEventInformationSection, SelectionInformationSection):
+
+            # 番組情報を取得するイベント (EIT のイベントのループ、または SIT のサービスのループの要素) のリスト
+            ## 対象のイベントを含まないセクションでは None になる
+            event_data_list: Sequence[Syntax] | None = None
+
+            # パーシャル TS の SIT のサービスのループには、EIT[p/f] の現在の番組と同じく、その時点で放送している番組の情報が入っている
+            ## SIT は次の番組の情報を持たないため、次の番組の情報は取得できない
+            ## 録画の頭に録画開始マージンとして入る前の番組は数秒で SIT が切り替わるので、20% の位置の SIT の番組が録画対象の番組になる
+            if isinstance(eit, SelectionInformationSection):
+                if is_following is True:
+                    break
+                sit_services: list[Syntax] = []
+                for service in eit.services:
+                    if service.service_id in eit_service_ids:
+                        sit_services.append(service)
+                event_data_list = sit_services
 
             # section_number と service_id が一致したときだけ
             # サービス ID が必要な理由は、CS などで同じトランスポートストリームに含まれる別チャンネルの番組情報になることを防ぐため
-            if eit.section_number == eit_section_number and eit.service_id == channel.service_id:
+            elif eit.section_number == eit_section_number and eit.service_id in eit_service_ids:
                 # TSID / ONID も一致する場合のみ採用する
                 ## EIT は service_id だけでなく TSID / ONID も持つため、誤検出を避けるため一致条件に含める
                 if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
                     continue
                 if channel.network_id is not None and eit.original_network_id != channel.network_id:
                     continue
+                event_data_list = eit.events
+
+            if event_data_list is not None:
 
                 # EIT から得られる各種 Descriptor 内の情報を取得
                 # ariblib.event が各種 Descriptor のラッパーになっていたのでそれを利用
-                for event_data in eit.events:
+                ## ariblib.event.Event は、SIT とそのサービスのループの要素からも EIT と同じ属性のイベントを作れる
+                for event_data in event_data_list:
                     try:
                         # EIT 内のイベントを取得
-                        event: Any = ariblib.event.Event(eit, event_data)
+                        event = ariblib.event.Event(eit, event_data)
                     except (IndexError, ValueError, TypeError, AttributeError) as ex:
                         # 破損したイベントをスキップ
                         corrupted_events += 1
@@ -552,15 +568,15 @@ class TSInfoAnalyzer:
 
                     # デフォルトで毎回設定されている情報
                     ## イベント ID
-                    event_id = int(event.event_id)
+                    event_id = event.event_id
                     ## 番組開始時刻 (タイムゾーンを日本時間 (+9:00) に設定)
                     ## 注意: present の duration が None (終了時間未定) の場合のみ、following の start_time が None になることがある
                     if event.start_time is not None:
-                        start_time = NormalizeToJSTDatetime(cast(datetime, event.start_time))
+                        start_time = NormalizeToJSTDatetime(event.start_time)
                     ## 番組長 (秒)
                     ## 注意: 臨時ニュースなどで放送時間未定の場合は None になる
                     if event.duration is not None:
-                        duration = cast(timedelta, event.duration).total_seconds()
+                        duration = event.duration.total_seconds()
                     ## 番組終了時刻を start_time と duration から算出
                     if start_time is not None and duration is not None:
                         end_time = start_time + timedelta(seconds=duration)
@@ -580,7 +596,7 @@ class TSInfoAnalyzer:
                     if hasattr(event, 'detail'):
                         detail = {}
                         # 番組詳細テキストから取得した、見出しと本文の辞書ごとに
-                        for head, text in cast(dict[str, str], event.detail).items():
+                        for head, text in event.detail.items():
                             # 見出しと本文
                             ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
                             ## strip() では明示的に半角スペースと改行のみを指定している
@@ -655,14 +671,15 @@ class TSInfoAnalyzer:
                     # EIT から取得できるすべての情報を取得できたら抜ける
                     ## 一回の EIT ですべての情報 (Descriptor) が降ってくるとは限らない
                     ## 副音声情報は副音声がない番組では当然取得できないので、除外している
-                    if all([
+                    ## 番組長が未定 (放送時間未定) の番組は、100 回読んでも確定しなければ打ち切り、後で録画の末尾から確定した番組長を探す
+                    ## SIT は1つのセクションに番組のすべての記述子を含み、含まれない記述子は後の SIT にも含まれないため、1回読んだら抜ける
+                    if isinstance(eit, SelectionInformationSection) or all([
                         event_id is not None,
                         title is not None,
                         description is not None,
                         detail is not None,
                         start_time is not None,
-                        end_time is not None,
-                        duration is not None,
+                        duration is not None or count >= 100,
                         is_free is not None,
                         genres is not None,
                         primary_audio_type is not None,
@@ -691,11 +708,102 @@ class TSInfoAnalyzer:
                 logging.warning(f'{self.recorded_video.file_path}: Analyzing EIT information ({p_or_f}) timed out.')
                 break
 
-            # MPEG-TS 形式の場合、ループが 100 で割り切れるたびに現在の位置から 188MB シークする
+            # MPEG-TS 形式の場合、ループが 100 で割り切れるたびに現在の位置から TS パケット 1000000 個分 (188 バイトのパケットなら 188MB) シークする
             ## ループが 100 以上に到達しているときはおそらく放送時間が未定の番組なので、放送時間が確定するまでシークする
             ## PSI/SI 書庫から生成した仮想 TS ファイルには映像/音声が含まれていないため、それ以外の形式の場合はシークしない
             if self.recorded_video.container_format == 'MPEG-TS' and count % 100 == 0:
-                self.ts.seek(ts.PACKET_SIZE * 1000000, 1)  # 188MB (188 * 1000000 バイト) 進める
+                self.ts.seek(self.ts.packet_size * 1000000, 1)  # TS パケット 1000000 個分進める
+
+        # 放送時間未定で始まった番組では、録画の末尾に近い EIT から、その番組の確定した番組長を探す
+        ## 番組長は放送の途中で確定し、確定した後の EIT[p/f] には確定した値が入る
+        ## 録画の末尾には録画終了マージンとして次の番組が入るため、event_id が同じ EIT だけを対象にする
+        if duration is None and event_id is not None and start_time is not None and is_following is False:
+            target_event_id = event_id
+            target_start_time = start_time
+
+            # 対象の番組の最後の EIT のイベントの有無と開始時刻・番組長、対象の番組より後に始まった別の番組の最も早い開始時刻
+            target_found = False
+            last_target_start_time: datetime | None = None
+            last_target_duration: timedelta | None = None
+            next_start_time: datetime | None = None
+
+            def ScanEndTimeCandidates(stop_offset: int | None) -> None:
+                """
+                現在の位置から stop_offset (None なら末尾) までの EIT[p/f] の現在の番組 (パーシャル TS では SIT の番組) を読み、
+                対象の番組の最後のイベントと、対象の番組より後に始まった別の番組の開始時刻を記録する
+
+                Args:
+                    stop_offset (int | None): 読み終える位置のバイト数 (None なら末尾まで読む)
+                """
+                nonlocal target_found, last_target_start_time, last_target_duration, next_start_time
+                for eit in self.ts.sections(ActualStreamPresentFollowingEventInformationSection, SelectionInformationSection):
+                    if stop_offset is not None and self.ts.tell() > stop_offset:
+                        break
+
+                    # 現在の番組の event_id・開始時刻・番組長のリスト
+                    present_events: list[tuple[int, datetime | None, timedelta | None]] = []
+                    if isinstance(eit, SelectionInformationSection):
+                        # パーシャル TS の SIT のサービスのループから、EIT と同じ属性のイベントを作る
+                        for service in eit.services:
+                            if service.service_id not in eit_service_ids:
+                                continue
+                            try:
+                                event = ariblib.event.Event(eit, service)
+                            except ValueError:
+                                # 放送 ID 記述子がない (元の放送の event_id が分からない) サービスは読み飛ばす
+                                continue
+                            present_events.append((event.event_id, event.start_time, event.duration))
+                    else:
+                        if eit.section_number != 0 or eit.service_id not in eit_service_ids:
+                            continue
+                        if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
+                            continue
+                        if channel.network_id is not None and eit.original_network_id != channel.network_id:
+                            continue
+                        for event_data in eit.events:
+                            present_events.append((event_data.event_id, event_data.start_time, event_data.duration))
+
+                    for present_event_id, present_start_time, present_duration in present_events:
+                        if present_event_id == target_event_id:
+                            target_found = True
+                            last_target_start_time = present_start_time
+                            last_target_duration = present_duration
+                            continue
+                        # 対象の番組の後に始まった別の番組が、現在の番組として流れている
+                        if present_start_time is None:
+                            continue
+                        event_start_time = NormalizeToJSTDatetime(present_start_time)
+                        if event_start_time > target_start_time and (next_start_time is None or event_start_time < next_start_time):
+                            next_start_time = event_start_time
+
+            if self.recorded_video.container_format == 'MPEG-TS':
+                # 録画の末尾から TS パケット 50000 個分 (188 バイトのパケットなら約 9.4MB) ずつ前へ戻りながら読み、
+                # 対象の番組の EIT が初めて見つかった区間で打ち切る
+                ## その区間の最後の EIT が、録画の中で最も新しい対象の番組の情報になる
+                window_size = self.ts.packet_size * 50000
+                lower_offset = ClosestMultiple(int(self.end_ts_offset * 0.2), self.ts.packet_size)
+                window_offset = ClosestMultiple(max(self.end_ts_offset - window_size, lower_offset), self.ts.packet_size)
+                while target_found is False:
+                    self.ts.seek(window_offset)
+                    ScanEndTimeCandidates(window_offset + window_size)
+                    if window_offset <= lower_offset:
+                        break
+                    window_offset = ClosestMultiple(max(window_offset - window_size, lower_offset), self.ts.packet_size)
+            else:
+                # PSI/SI 書庫から生成した仮想 TS ファイルには 20% の位置から末尾までの EIT が入っているので、すべて読む
+                self.ts.seek(0)
+                ScanEndTimeCandidates(None)
+
+            # 対象の番組の最後の EIT で番組長が確定していれば、その開始時刻と番組長を使う
+            if last_target_start_time is not None and last_target_duration is not None:
+                start_time = NormalizeToJSTDatetime(last_target_start_time)
+                duration = last_target_duration.total_seconds()
+                end_time = start_time + timedelta(seconds=duration)
+            # 番組長が確定しないまま次の番組に切り替わった場合は、次の番組の開始時刻を番組終了時刻にする
+            elif next_start_time is not None:
+                end_time = next_start_time
+                duration = (end_time - start_time).total_seconds()
+            # どちらでもない (番組長の確定を待たずに録画が終わった) 場合は、後続の処理で録画終了時刻を番組終了時刻にする
 
         # この時点でタイトルを取得できていない場合（タイムアウト発生時）、フォールバックとして拡張子を除いたファイル名をフォーマットした上でタイトルとして使用する
         if title is None:
@@ -785,72 +893,60 @@ class TSInfoAnalyzer:
             return None
 
         # PMT から映像・音声 PID を取得
-        ## ariblib の ProgramMapSection は _pids クラス属性がデフォルトで定義されていないため、
-        ## 動的に追加してから sections() メソッドを使用する
         service_pid_map: dict[int, dict[str, set[int]]] = {}
 
         # ファイルの 20% 位置にシークしてから PMT を解析する
         ## Mirakurun/mirakc では録画開始直後はサービス分離が完了しておらず、古い PMT 情報が含まれている場合がある
         ## ファイルの 20% 位置であれば、サービス分離が完了した後の正しい PMT を取得できる可能性が高い
-        ## ariblib の sections() メソッドは内部キャッシュを持っておりシーク位置を尊重しないため、
-        ## 新しいファイルハンドルを開いて 20% 位置から読み込む必要がある
         effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
-        pmt_seek_offset = ClosestMultiple(int(effective_size * 0.2), ts.PACKET_SIZE)
+        pmt_seek_offset = ClosestMultiple(int(effective_size * 0.2), self.ts.packet_size)
+        self.ts.seek(pmt_seek_offset)
 
-        # ProgramMapSection._pids が存在しない場合は空リストで初期化
-        if not hasattr(ProgramMapSection, '_pids'):
-            ProgramMapSection._pids = []  # type: ignore[attr-defined]
-        original_pmt_pids = ProgramMapSection._pids  # type: ignore[attr-defined]
-        pmt_pids_to_use = list(service_pmt_pid_map.values())
-        ProgramMapSection._pids = pmt_pids_to_use  # type: ignore[attr-defined]
-        try:
-            # 20% 位置から始まる新しいファイルハンドルを開いて PMT を解析
-            ## サービス分離済みのファイルでは特定のサービスの PMT しか存在しないため、
-            ## 一定回数 PMT を確認したら終了する
-            with ariblib.tsopen(self.recorded_video.file_path, chunk=1000) as pmt_ts:
-                pmt_ts.seek(pmt_seek_offset)
-                pmt_check_count = 0
-                max_pmt_checks = len(service_pmt_pid_map) * 3  # 各サービスにつき最大3回のチェック
-                for pmt in pmt_ts.sections(ProgramMapSection):
-                    pmt_check_count += 1
-                    service_id = int(pmt.program_number)
-                    if service_id not in service_pmt_pid_map:
-                        continue
-                    # 既にこのサービスの PMT を取得済みならスキップ
-                    if service_id in service_pid_map:
-                        # すべてのサービスを確認済みか、一定回数チェックしたら終了
-                        if len(service_pid_map) == len(service_pmt_pid_map) or pmt_check_count >= max_pmt_checks:
-                            break
-                        continue
-                    video_pids = {int(p) for p in pmt.video_pids()}
-                    audio_pids = {int(p) for p in pmt.audio_pids()}
-                    if len(video_pids) == 0 and len(audio_pids) == 0:
-                        continue
-                    service_pid_map[service_id] = {
-                        'video_pids': video_pids,
-                        'audio_pids': audio_pids,
-                    }
-                    # すべてのサービスを確認済みか、一定回数チェックしたら終了
-                    if len(service_pid_map) == len(service_pmt_pid_map) or pmt_check_count >= max_pmt_checks:
-                        break
-        finally:
-            ProgramMapSection._pids = original_pmt_pids  # type: ignore[attr-defined]
+        # PAT から得た PMT の PID を指定して PMT を解析
+        ## サービス分離済みのファイルでは特定のサービスの PMT しか存在しないため、
+        ## 一定回数 PMT を確認したら終了する
+        pmt_check_count = 0
+        max_pmt_checks = len(service_pmt_pid_map) * 3  # 各サービスにつき最大3回のチェック
+        for pmt in self.ts.sections(ProgramMapSection, pids=service_pmt_pid_map.values()):
+            pmt_check_count += 1
+            service_id = int(pmt.program_number)
+            if service_id not in service_pmt_pid_map:
+                continue
+            # 既にこのサービスの PMT を取得済みならスキップ
+            if service_id in service_pid_map:
+                # すべてのサービスを確認済みか、一定回数チェックしたら終了
+                if len(service_pid_map) == len(service_pmt_pid_map) or pmt_check_count >= max_pmt_checks:
+                    break
+                continue
+            video_pids = {int(p) for p in pmt.video_pids()}
+            audio_pids = {int(p) for p in pmt.audio_pids()}
+            if len(video_pids) == 0 and len(audio_pids) == 0:
+                continue
+            service_pid_map[service_id] = {
+                'video_pids': video_pids,
+                'audio_pids': audio_pids,
+            }
+            # すべてのサービスを確認済みか、一定回数チェックしたら終了
+            if len(service_pid_map) == len(service_pmt_pid_map) or pmt_check_count >= max_pmt_checks:
+                break
 
         if len(service_pid_map) == 0:
             return None
 
         # TS 内の PID 出現頻度を取得
+        ## サンプルの位置と長さは、ファイル上の TS パケットサイズ (188 または 192) の倍数にそろえる
+        packet_size = self.ts.packet_size
         try:
             file_path = Path(self.recorded_video.file_path)
             effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
-            if effective_size < ts.PACKET_SIZE * 100:
+            if effective_size < packet_size * 100:
                 return None
-            sample_offset = ClosestMultiple(int(effective_size * 0.2), ts.PACKET_SIZE)
-            if sample_offset > effective_size - ts.PACKET_SIZE:
-                sample_offset = max(effective_size - ts.PACKET_SIZE, 0)
-            sample_size = ClosestMultiple(6 * 1024 * 1024, ts.PACKET_SIZE)
+            sample_offset = ClosestMultiple(int(effective_size * 0.2), packet_size)
+            if sample_offset > effective_size - packet_size:
+                sample_offset = max(effective_size - packet_size, 0)
+            sample_size = ClosestMultiple(6 * 1024 * 1024, packet_size)
             sample_size = min(sample_size, effective_size - sample_offset)
-            if sample_size < ts.PACKET_SIZE * 100:
+            if sample_size < packet_size * 100:
                 return None
             with file_path.open('rb') as f:
                 f.seek(sample_offset)
@@ -859,8 +955,10 @@ class TSInfoAnalyzer:
             logging.warning(f'{self.recorded_video.file_path}: Failed to read TS sample for PID analysis:', exc_info=ex)
             return None
 
+        # 192 バイトのパケットでは、先頭の4バイトの TP_extra_header の後ろに 188 バイトの TS パケットが続く
+        ## サンプルの先頭はパケットの境界にそろえてあるので、最初の TS パケットの同期バイトは TP_extra_header の長さの位置にある
         pid_counts: dict[int, int] = {}
-        offset = 0
+        offset = packet_size - ts.PACKET_SIZE
         while offset + ts.PACKET_SIZE <= len(sample_data):
             if sample_data[offset] != ts.SYNC_BYTE[0]:
                 offset += 1
@@ -868,7 +966,7 @@ class TSInfoAnalyzer:
             packet = sample_data[offset:offset + ts.PACKET_SIZE]
             packet_pid = pid(packet)
             pid_counts[packet_pid] = pid_counts.get(packet_pid, 0) + 1
-            offset += ts.PACKET_SIZE
+            offset += packet_size
 
         if len(pid_counts) == 0:
             return None

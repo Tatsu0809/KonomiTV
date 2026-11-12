@@ -106,7 +106,6 @@ async def VideoHLSPlaylistAPI(
         recorded_program,
         stream_quality.quality,
         stream_quality.encoding_options,
-        is_new_session_allowed = True,
     )
 
     # 映像・主音声と副音声は同じエンコード結果を共有し、プレイリストの種類だけをこの API で切り替える
@@ -164,7 +163,12 @@ async def VideoHLSSegmentAPI(
 
     # 品質とオプション指定に対応する録画視聴セッションを取得
     assert stream_quality.quality != 'original'
-    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
+    video_stream = VideoStream(
+        session_id,
+        recorded_program,
+        stream_quality.quality,
+        stream_quality.encoding_options,
+    )
 
     # セグメントを取得（キャッシュキーはブラウザキャッシュ避けのための ID なので特に使わない）
     try:
@@ -232,7 +236,12 @@ async def VideoHLSBufferAPI(
 
     # 品質とオプション指定に対応する録画視聴セッションを取得
     assert stream_quality.quality != 'original'
-    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
+    video_stream = VideoStream(
+        session_id,
+        recorded_program,
+        stream_quality.quality,
+        stream_quality.encoding_options,
+    )
 
     # バッファ範囲の変更を監視し、変更があればバッファ範囲をイベントストリームとして出力する
     async def generator():
@@ -294,7 +303,12 @@ async def VideoHLSKeepAliveAPI(
 
     # 品質とオプション指定に対応する録画視聴セッションを取得
     assert stream_quality.quality != 'original'
-    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
+    video_stream = VideoStream(
+        session_id,
+        recorded_program,
+        stream_quality.quality,
+        stream_quality.encoding_options,
+    )
 
     # セッションのアクティブ状態を維持する
     video_stream.keepAlive()
@@ -344,7 +358,6 @@ async def VideoOfflineStreamAPI(
             recorded_program,
             stream_quality.quality,
             stream_quality.encoding_options,
-            is_new_session_allowed = True,
         )
         video_stream.getVirtualPlaylist()
 
