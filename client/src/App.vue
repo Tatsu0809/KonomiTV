@@ -18,13 +18,14 @@ if(document.referrer.endsWith('.cloudflareaccess.com/')) {
     if (!CFZTStore.is_CFZT) {
         CFZTStore.fetchCFZTIdentity();
     }
-    // 現在の URL を解析
-    const u = new URL(location.href);
-    // 'pwa' パラメータが 'false' の場合、URL から削除する
-    if (u.searchParams.get('pwa') === 'false') {
-        u.searchParams.delete('pwa');
-        history.pushState('', '', u.href);
-    }
+}
+
+// Cloudflare Access や Apache OIDC から戻った URL に付く pwa=false を外す
+// 残ったままだと、以降の画面遷移も Service Worker を迂回し続ける
+const current_url = new URL(location.href);
+if (current_url.searchParams.get('pwa') === 'false') {
+    current_url.searchParams.delete('pwa');
+    history.pushState('', '', current_url.href);
 }
 
 </script>
