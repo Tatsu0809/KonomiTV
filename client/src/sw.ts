@@ -21,10 +21,10 @@ precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
 
 // 通常画面は従来の generateSW と同じく index.html へ戻し、API・Cloudflare の内部 URL・
-// Apache (mod_auth_openidc) のコールバック /oidc/redirect は対象から外す
+// Apache (mod_auth_openidc) の /oidc/callback などのコールバックは対象から外す
 // pwa=false の画面遷移は Service Worker を通さず、プロキシの認証リダイレクトをブラウザに処理させる
 registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), {
-    denylist: [/^\/api/, /^\/cdn-cgi/, /^\/oidc\/redirect/, /[?&]pwa=false/],
+    denylist: [/^\/api/, /^\/cdn-cgi/, /^\/oidc\//, /[?&]pwa=false/],
 }));
 
 // 保存済み HLS は /local/offline-videos/ 以下の仮想 URL として CacheStorage から返す

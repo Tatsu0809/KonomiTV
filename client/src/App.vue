@@ -11,7 +11,9 @@
 <script lang="ts" setup>
 
 import Snackbars from '@/components/Snackbars.vue';
+import { RedirectForApacheOIDC } from '@/services/APIClient';
 import useCFZTStore from '@/stores/CloudflareZerotrustStone';
+import Utils from '@/utils';
 
 if(document.referrer.endsWith('.cloudflareaccess.com/')) {
     const CFZTStore = useCFZTStore();
@@ -26,6 +28,29 @@ const current_url = new URL(location.href);
 if (current_url.searchParams.get('pwa') === 'false') {
     current_url.searchParams.delete('pwa');
     history.pushState('', '', current_url.href);
+}
+
+// Service Worker がキャッシュした画面は Apache を通らないため、API と同じ 401 でセッション切れを判断する
+// 401 のときは画面遷移に切り替え、Apache が IdP へ 302 できるようにする
+if (current_url.searchParams.get('__cf_access_message') === null) {
+    void (async () => {
+        try {
+            const oidc_response = await fetch(`${Utils.api_base_url}/version`, {
+                redirect: 'manual',
+                credentials: 'include',
+                cache: 'no-store',
+            });
+            if (oidc_response.type === 'opaqueredirect' || oidc_response.status === 401) {
+                const body = oidc_response.status === 401 ? await oidc_response.text() : '';
+                if (oidc_response.type === 'opaqueredirect' || body.includes('<h1>Unauthorized</h1>')) {
+                    await RedirectForApacheOIDC();
+                }
+            }
+        } catch (error) {
+            // サーバーに届かなかったときは、画面を開いたままにする
+            console.error(error);
+        }
+    })();
 }
 
 </script>

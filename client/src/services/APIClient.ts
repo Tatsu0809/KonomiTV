@@ -7,13 +7,48 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, AxiosResponseHeaders, RawAxiosResponseHeaders } from 'axios';
 
 import Message from '@/message';
+import useCFZTStore from '@/stores/CloudflareZerotrustStone';
 import useUserStore from '@/stores/UserStore';
 import Utils from '@/utils';
-import useCFZTStore from '@/stores/CloudflareZerotrustStone';
 
 
 // プロキシ認証への画面遷移を、同時に失敗した複数の API から重複して始めない
 let proxy_auth_redirect_started = false;
+
+
+/**
+ * Apache (mod_auth_openidc) が fetch / XHR に返す 401 かどうかを判定する
+ * 画面遷移には IdP への 302 を返すが、Sec-Fetch-Mode: cors の API リクエストには HTML の 401 を返す
+ * KonomiTV 自身の 401 は JSON の detail なので、ここには含めない
+ * @param data Axios が受け取ったレスポンスボディ
+ * @returns Apache の認証エラーなら true
+ */
+function IsApacheOIDCUnauthorized(data: unknown): boolean {
+    return typeof data === 'string' && data.includes('<h1>Unauthorized</h1>');
+}
+
+
+/**
+ * Service Worker を外してから、同じ URL へ画面遷移する
+ * 画面遷移は Sec-Fetch-Mode: navigate になるため、Apache が IdP へ 302 する
+ */
+export async function RedirectForApacheOIDC(): Promise<void> {
+    if (proxy_auth_redirect_started) {
+        return;
+    }
+    const current_url = new URL(location.href);
+    if (current_url.searchParams.get('pwa') === 'false' || current_url.searchParams.get('__cf_access_message')) {
+        return;
+    }
+    proxy_auth_redirect_started = true;
+    console.log('Apache OIDC login need!!');
+    current_url.searchParams.set('pwa', 'false');
+    if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+    }
+    location.href = current_url.href;
+}
 
 
 /** API リクエスト成功時のレスポンスを表すインターフェイス */
@@ -108,6 +143,11 @@ class APIClient {
 
             // エラーレスポンスがあれば、エラー内容と AxiosError を IErrorResponse に入れて返す
             if (result.response) {
+                // fetch 相当の API リクエストには、未ログインの Apache が HTML の 401 を返す
+                // この 401 を画面遷移に変えると、ブラウザが IdP への 302 を受け取れる
+                if (result.response.status === 401 && IsApacheOIDCUnauthorized(result.response.data)) {
+                    void RedirectForApacheOIDC();
+                }
                 return {
                     type: 'error',
                     status: result.response.status,
@@ -270,49 +310,67 @@ class APIClient {
                         Message.error(`${template}\nサーバーへの接続がタイムアウトしました。(${error_response.error.message})`);
                     } else if (error_response.error.code === AxiosError.ERR_NETWORK) {
                         // 予期しないネットワークエラーの場合
-                        Message.error(`${template}\n予期しないネットワークエラーが発生しました。(${error_response.error.message})`);
-                        if (!error_response.error.config?.url?.startsWith('/cdn-cgi/') && !proxy_auth_redirect_started){
-                            // 同時に失敗した API から、認証の確認と画面遷移を二重に始めない
-                            proxy_auth_redirect_started = true;
-                            (async ()=>{
-                                const u = new URL(location.href);
-                                // 認証用の画面遷移を終えた直後か、Cloudflare Access のエラー画面では確認を終える
-                                if (u.searchParams.get('pwa') === 'false' || u.searchParams.get('__cf_access_message')) {
-                                    proxy_auth_redirect_started = false;
-                                    return;
-                                }
-                                const CFZTStore = useCFZTStore();
-                                await CFZTStore.fetchCFZTIdentity();
-                                if (CFZTStore.is_CFZT && !CFZTStore.is_login) {
-                                    console.log('Cloudflare ZeroTrust Login need!!');
-                                    u.searchParams.set('pwa','false');
-                                    location.href = u.href;
-                                    return;
-                                }
-
-                                // Apache (mod_auth_openidc) は未ログインの API を IdP へ 302 する
-                                // axios は別オリジンへのリダイレクトをネットワークエラーとして返すため、
-                                // リダイレクトを追わずに同じ API を見て、302 か 401 のときだけ画面遷移する
-                                // ?pwa=false は Service Worker の対象外なので、ブラウザが /oidc/redirect の認証を進められる
-                                let oidc_response: Response | null = null;
-                                try {
-                                    oidc_response = await fetch('/api/version', {
-                                        redirect: 'manual',
-                                        credentials: 'same-origin',
-                                    });
-                                } catch (error) {
-                                    // 接続に失敗した場合は、表示済みのネットワークエラーを維持する
-                                    console.error(error);
-                                }
-                                if (oidc_response !== null && (oidc_response.type === 'opaqueredirect' || oidc_response.status === 401)) {
-                                    u.searchParams.set('pwa', 'false');
-                                    location.href = u.href;
-                                    return;
-                                }
-                                // プロキシ認証が原因ではなかったので、次のネットワークエラーで確認し直す
-                                proxy_auth_redirect_started = false;
-                            })();
+                        // Cloudflare の身元確認や、プロキシ認証への遷移を始めるリクエスト自身は、ここから再度遷移しない
+                        if (error_response.error.config?.url?.startsWith('/cdn-cgi/') || proxy_auth_redirect_started) {
+                            Message.error(`${template}\n予期しないネットワークエラーが発生しました。(${error_response.error.message})`);
+                            return;
                         }
+                        // 同時に失敗した API から、認証の確認と画面遷移を二重に始めない
+                        proxy_auth_redirect_started = true;
+                        (async ()=>{
+                            const u = new URL(location.href);
+                            // 認証用の画面遷移を終えた直後か、Cloudflare Access のエラー画面では通常のエラー表示に戻す
+                            if (u.searchParams.get('pwa') === 'false' || u.searchParams.get('__cf_access_message')) {
+                                proxy_auth_redirect_started = false;
+                                Message.error(`${template}\n予期しないネットワークエラーが発生しました。(${error_response.error.message})`);
+                                return;
+                            }
+
+                            // Apache (mod_auth_openidc) は未ログインの API を IdP へ 302 する
+                            // axios は別オリジンへのリダイレクトをネットワークエラーとして返すため、
+                            // 実際の API と同じ URL を、リダイレクトを追わずに一度だけ見る
+                            // 302 は opaqueredirect、OIDCUnAuthAction 401 のときは 401 になる
+                            let oidc_response: Response | null = null;
+                            try {
+                                oidc_response = await fetch(`${Utils.api_base_url}/version`, {
+                                    redirect: 'manual',
+                                    credentials: 'include',
+                                    cache: 'no-store',
+                                });
+                            } catch (error) {
+                                // サーバーに届かなかった場合は、下の通常エラーとして表示する
+                                console.error(error);
+                            }
+                            let needs_oidc_login = oidc_response !== null && oidc_response.type === 'opaqueredirect';
+                            if (oidc_response !== null && oidc_response.status === 401) {
+                                // fetch には 302 ではなく HTML の 401 が返る
+                                needs_oidc_login = (await oidc_response.text()).includes('<h1>Unauthorized</h1>');
+                            }
+
+                            const CFZTStore = useCFZTStore();
+                            if (needs_oidc_login === false) {
+                                await CFZTStore.fetchCFZTIdentity();
+                            }
+                            if (needs_oidc_login) {
+                                proxy_auth_redirect_started = false;
+                                await RedirectForApacheOIDC();
+                                return;
+                            }
+                            if (CFZTStore.is_CFZT && !CFZTStore.is_login) {
+                                console.log('Cloudflare ZeroTrust Login need!!');
+                                u.searchParams.set('pwa', 'false');
+                                if ('serviceWorker' in navigator) {
+                                    const registrations = await navigator.serviceWorker.getRegistrations();
+                                    await Promise.all(registrations.map((registration) => registration.unregister()));
+                                }
+                                location.href = u.href;
+                                return;
+                            }
+
+                            // プロキシ認証が原因ではなかったので、次のネットワークエラーで確認し直す
+                            proxy_auth_redirect_started = false;
+                            Message.error(`${template}\n予期しないネットワークエラーが発生しました。(${error_response.error.message})`);
+                        })();
                     } else {
                         // それ以外のエラーの場合
                         Message.error(`${template}(${error_response.error.message})`);
