@@ -249,8 +249,15 @@ def Updater(version: str, answers: InstallerAnswers) -> bool:
             return False  # 処理中断
 
         # 新しいバージョンのコードをチェックアウト
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
-        revision = 'zero-trust' if version == 'latest' else f'v{version}'
+        ## latest の場合は zero-trust ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
+        ## git fetch はローカルの zero-trust ブランチを更新しないため、latest の場合は -B でローカルの zero-trust ブランチを
+        ## リモートの最新 (origin/zero-trust) に合わせて作り直してからチェックアウトする
+        ## 単に zero-trust をチェックアウトすると、初回インストール時点などの古いローカルの zero-trust ブランチのままになってしまう
+        checkout_args: list[str | Path]
+        if version == 'latest':
+            checkout_args = ['git', 'checkout', '--force', '-B', 'zero-trust', 'origin/zero-trust']
+        else:
+            checkout_args = ['git', 'checkout', '--force', f'v{version}']
         result = RunSubprocess(
             'KonomiTV のソースコードを更新しています…',
             checkout_args,
@@ -299,11 +306,11 @@ def Updater(version: str, answers: InstallerAnswers) -> bool:
         progress = CreateDownloadInfiniteProgress()
 
         # GitHub からソースコードをダウンロード
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
+        ## latest の場合は zero-trust ブランチを、それ以外は指定されたバージョンのタグをダウンロード
         if version == 'latest':
             source_code_response = requests.get('https://codeload.github.com/Tatsu0809/KonomiTV/zip/refs/heads/zero-trust')
         else:
-            source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
+            source_code_response = requests.get(f'https://codeload.github.com/Tatsu0809/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
 
         # ダウンロードしたデータを随時一時ファイルに書き込む

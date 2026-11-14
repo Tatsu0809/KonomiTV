@@ -595,7 +595,7 @@ def Installer(version: str, answers: InstallerAnswers) -> bool:
     if is_git_installed is True:
 
         # git clone でソースコードをダウンロード
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
+        ## latest の場合は zero-trust ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
         revision = 'zero-trust' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを Git でダウンロードしています…',
@@ -616,7 +616,7 @@ def Installer(version: str, answers: InstallerAnswers) -> bool:
         progress = CreateDownloadInfiniteProgress()
 
         # GitHub からソースコードをダウンロード
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
+        ## latest の場合は zero-trust ブランチを、それ以外は指定されたバージョンのタグをダウンロード
         if version == 'latest':
             source_code_response = requests.get('https://codeload.github.com/Tatsu0809/KonomiTV/zip/refs/heads/zero-trust')
         else:
@@ -1107,7 +1107,7 @@ def Installer(version: str, answers: InstallerAnswers) -> bool:
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
             )
 
-            # すべてのプロファイルで有効な受信規則を追加
+            # プライベート・パブリックネットワークプロファイルで有効な受信規則を追加
             subprocess.run(
                 args = [
                     'netsh', 'advfirewall', 'firewall', 'add', 'rule', 'name=KonomiTV Service', 'description=KonomiTV Windows Service.',

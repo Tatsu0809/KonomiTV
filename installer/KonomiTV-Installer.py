@@ -144,7 +144,7 @@ def main(args: argparse.Namespace) -> bool:
             f'    この PC 上の KonomiTV を version {TARGET_VERSION} へ[bold]アップデート[/bold]するには [bold cyan]2[/bold cyan] を、',
             '    この PC 上の KonomiTV を[bold]アンインストール[/bold]するには [bold cyan]3[/bold cyan] を入力してください。',
             '',
-            '    master ブランチの最新コミットが反映されている[bold]開発版をインストール[/bold]するには [bold cyan]4[/bold cyan] を、',
+            '    zero-trust ブランチの最新コミットが反映されている[bold]開発版をインストール[/bold]するには [bold cyan]4[/bold cyan] を、',
             '    [bold]開発版へアップデート[/bold]するには [bold cyan]5[/bold cyan] を入力してください。',
             '    なお、開発版の安定動作は保証されていないため、予めご了承の上ご利用ください。',
         ]
@@ -191,7 +191,7 @@ def main(args: argparse.Namespace) -> bool:
         )
 
     # 実行タイプごとにそれぞれの実装を呼び出す
-    ## 開発版では、master ブランチの最新コミットをインストール・アップデートする
+    ## 開発版では、zero-trust ブランチの最新コミットをインストール・アップデートする
     version = 'latest' if is_development_version is True else TARGET_VERSION
     if command == 'install':
         return Installer(version, answers)
@@ -237,7 +237,7 @@ def ParseArguments() -> argparse.Namespace:
         help='(Windows) Password of --service-user when --service-account is User.')
 
     install_parser = subparsers.add_parser('install', parents=[common_parser, service_account_parser], help='Install KonomiTV.')
-    install_parser.add_argument('--dev', action='store_true', help='Install the latest development version (master branch).')
+    install_parser.add_argument('--dev', action='store_true', help='Install the latest development version (zero-trust branch).')
     install_parser.add_argument('--install-path', help='Folder to install KonomiTV into.')
     install_parser.add_argument('--backend', choices=['EDCB', 'Mirakurun'], help='Backend to use. Defaults to EDCB.')
     install_parser.add_argument('--edcb-url', help='URL of the EDCB (EpgTimerNW) TCP API. e.g. tcp://127.0.0.1:4510/')
@@ -250,7 +250,7 @@ def ParseArguments() -> argparse.Namespace:
         help='(Linux) Install with Docker + Docker Compose. Defaults to yes if Docker is installed.')
 
     update_parser = subparsers.add_parser('update', parents=[common_parser], help='Update KonomiTV.')
-    update_parser.add_argument('--dev', action='store_true', help='Update to the latest development version (master branch).')
+    update_parser.add_argument('--dev', action='store_true', help='Update to the latest development version (zero-trust branch).')
     update_parser.add_argument('--update-path', help='Folder where KonomiTV is installed.')
 
     uninstall_parser = subparsers.add_parser('uninstall', parents=[common_parser], help='Uninstall KonomiTV.')
